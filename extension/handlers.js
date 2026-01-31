@@ -31,7 +31,19 @@ import {
   pressKey,
   executeScript,
   paste,
+  recordStart,
+  handleDebuggerEvent,
 } from './commands.js';
+
+// Set up debugger event listener for screencast frames
+chrome.debugger.onEvent.addListener((source, method, params) => {
+  handleDebuggerEvent(source, method, params);
+});
+
+// Track debugger detach reasons
+chrome.debugger.onDetach.addListener((source, reason) => {
+  console.warn(`[Helm] Debugger detached from tab ${source.tabId}, reason: ${reason}`);
+});
 
 // Handle incoming server message
 export async function handleServerMessage(message) {
@@ -236,6 +248,10 @@ async function handleCommand(command, params) {
     // Scripting
     case 'execute':
       return await executeScript(params.code, params.tabId, params.sessionId);
+
+    // Recording
+    case 'record_start':
+      return await recordStart(params.tabId, params.sessionId, params.maxDuration, params.execute);
 
     // Misc
     case 'ping':

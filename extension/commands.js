@@ -2,6 +2,7 @@
 
 import { getTargetTab } from './tabs.js';
 import { getWindowIdForSession, WINDOW_WIDTH, WINDOW_HEIGHT, BROWSER_ZOOM } from './windows.js';
+import { activeRecordings } from './state.js';
 
 // Restricted URL patterns - cannot execute scripts on these pages
 const RESTRICTED_PATTERNS = [
@@ -740,7 +741,7 @@ export async function pressKey(key, selector = null, tabId, sessionId) {
   return result;
 }
 
-// Execute JavaScript code
+// Execute JavaScript code (uses debugger to bypass CSP)
 export async function executeScript(code, tabId, sessionId) {
   const tab = await getTargetTab(tabId, sessionId);
 
@@ -748,18 +749,30 @@ export async function executeScript(code, tabId, sessionId) {
     return { success: false, error: 'Cannot execute script on restricted page', restricted: true };
   }
 
-  const results = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    func: (c) => {
-      try {
-        return { success: true, result: eval(c) };
-      } catch (e) {
-        return { success: false, error: e.message };
-      }
-    },
-    args: [code],
-  });
-  return results[0].result;
+  try {
+    // Attach debugger temporarily
+    await chrome.debugger.attach({ tabId: tab.id }, '1.3');
+    await chrome.debugger.sendCommand({ tabId: tab.id }, 'Runtime.enable');
+
+    // Execute via debugger (bypasses CSP)
+    const result = await chrome.debugger.sendCommand({ tabId: tab.id }, 'Runtime.evaluate', {
+      expression: code,
+      returnByValue: true,
+    });
+
+    // Detach debugger
+    await chrome.debugger.detach({ tabId: tab.id });
+
+    if (result.exceptionDetails) {
+      return { success: false, error: result.exceptionDetails.text || 'Script error' };
+    }
+
+    return { success: true, result: result.result?.value };
+  } catch (e) {
+    // Try to detach on error
+    try { await chrome.debugger.detach({ tabId: tab.id }); } catch {}
+    return { success: false, error: e.message };
+  }
 }
 
 // Paste text into focused element (direct insertion, no clipboard API)
@@ -829,5 +842,162 @@ export async function paste(text, selector = null, tabId, sessionId) {
 
   if (!ok) return { success: false, error, restricted };
   return result;
+}
+
+// Start recording tab as video frames using Chrome Debugger API (Page.captureScreenshot loop)
+// If execute is provided, runs the JS code during recording and returns frames when done
+export async function recordStart(tabId, sessionId, maxDuration = 30000, execute = null) {
+  const tab = await getTargetTab(tabId, sessionId);
+  const targetTabId = tab.id;
+
+  // Check if already recording
+  if (activeRecordings.has(targetTabId)) {
+    return { success: false, error: 'Already recording this tab' };
+  }
+
+  // Validate maxDuration (max 60 seconds)
+  const duration = Math.min(Math.max(maxDuration, 1000), 60000);
+
+  // Initialize recording state
+  const recording = {
+    frames: [],
+    startTime: Date.now(),
+    maxDuration: duration,
+    timer: null,
+    captureInterval: null,
+    stopped: false,
+    stoppedAt: null,
+    tabId: targetTabId,
+  };
+  activeRecordings.set(targetTabId, recording);
+
+  try {
+    // Attach debugger (shows yellow banner)
+    await chrome.debugger.attach({ tabId: targetTabId }, '1.3');
+
+    // Enable Page and Runtime domains
+    await chrome.debugger.sendCommand({ tabId: targetTabId }, 'Page.enable');
+    await chrome.debugger.sendCommand({ tabId: targetTabId }, 'Runtime.enable');
+
+    // Capture screenshot every 100ms (~10 fps)
+    const captureFrame = async () => {
+      if (recording.stopped) return;
+      try {
+        const result = await chrome.debugger.sendCommand({ tabId: targetTabId }, 'Page.captureScreenshot', {
+          format: 'jpeg',
+          quality: 80,
+        });
+        if (result?.data) {
+          recording.frames.push({
+            data: result.data,
+            timestamp: Date.now() - recording.startTime,
+          });
+        }
+      } catch (e) {
+        console.warn(`[Helm] Frame capture error: ${e.message}`);
+      }
+    };
+
+    // Start capture loop
+    recording.captureInterval = setInterval(captureFrame, 100);
+    await captureFrame(); // First frame immediately
+
+    // Execute code and record
+    console.log(`[Helm] Recording with execute for tab ${targetTabId}`);
+
+    let executeResult = null;
+    let executeError = null;
+
+    try {
+      // Wrap code in async IIFE for await support
+      const wrappedCode = `(async () => { ${execute} })()`;
+
+      // Execute the code via debugger (same session, no extra attach)
+      const result = await chrome.debugger.sendCommand({ tabId: targetTabId }, 'Runtime.evaluate', {
+        expression: wrappedCode,
+        returnByValue: true,
+        awaitPromise: true, // Wait for async code
+      });
+
+      if (result.exceptionDetails) {
+        executeError = result.exceptionDetails.text || 'Script error';
+      } else {
+        executeResult = result.result?.value;
+      }
+    } catch (e) {
+      executeError = e.message;
+    }
+
+    // Small delay to capture final state
+    await new Promise(r => setTimeout(r, 200));
+    await captureFrame(); // Capture final frame
+
+    // Stop recording
+    recording.stopped = true;
+    recording.stoppedAt = Date.now();
+
+    if (recording.captureInterval) {
+      clearInterval(recording.captureInterval);
+    }
+
+    // Detach debugger
+    try {
+      await chrome.debugger.detach({ tabId: targetTabId });
+    } catch (e) {
+      console.warn(`[Helm] Debugger cleanup error: ${e.message}`);
+    }
+
+    const frames = recording.frames;
+    const recordingDuration = recording.stoppedAt - recording.startTime;
+    activeRecordings.delete(targetTabId);
+
+    console.log(`[Helm] Recording complete: ${frames.length} frames in ${recordingDuration}ms`);
+
+    return {
+      success: true,
+      tabId: targetTabId,
+      frameCount: frames.length,
+      duration: recordingDuration,
+      fps: frames.length > 0 ? Math.round(frames.length / (recordingDuration / 1000)) : 0,
+      frames,
+      executeResult,
+      executeError,
+    };
+  } catch (e) {
+    activeRecordings.delete(targetTabId);
+    return { success: false, error: `Failed to record: ${e.message}` };
+  }
+}
+
+// Handle debugger events (screencast frames)
+export function handleDebuggerEvent(source, method, params) {
+  if (method !== 'Page.screencastFrame') {
+    return;
+  }
+
+  const tabId = source.tabId;
+  const recording = activeRecordings.get(tabId);
+  if (!recording) {
+    console.log(`[Helm] Frame received but no recording for tab ${tabId}`);
+    return;
+  }
+
+  // Store frame
+  recording.frames.push({
+    data: params.data, // Base64 JPEG
+    timestamp: Date.now() - recording.startTime,
+    metadata: params.metadata,
+  });
+
+  console.log(`[Helm] Frame ${recording.frames.length} captured for tab ${tabId}`);
+
+  // Acknowledge frame to continue receiving (MUST be done to get next frame)
+  chrome.debugger.sendCommand({ tabId }, 'Page.screencastFrameAck', {
+    sessionId: params.sessionId,
+  }).then(() => {
+    console.log(`[Helm] Frame ack sent for tab ${tabId}`);
+  }).catch((e) => {
+    console.error(`[Helm] Frame ack failed: ${e.message}`);
+  });
 }
 

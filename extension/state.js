@@ -16,6 +16,9 @@ export let protocolVersion = 2;
 // Window isolation: sessionId -> windowId mapping
 export const sessionWindows = new Map();
 
+// Recording state: tabId -> { frames, startTime, maxDuration, timer }
+export const activeRecordings = new Map();
+
 // Persist sessionWindows to chrome.storage.local
 export async function saveSessionWindows() {
   const data = Object.fromEntries(sessionWindows);

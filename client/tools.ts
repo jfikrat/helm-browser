@@ -2,7 +2,8 @@
 
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import sharp from "sharp";
-import { writeFile } from "fs/promises";
+import { writeFile, mkdir, rm } from "fs/promises";
+import { execSync } from "child_process";
 
 import { WS_PORT, PROTOCOL_VERSION } from "../shared/config.js";
 import { mySessionId, daemonWs, isRegistered } from "./state.js";
@@ -204,6 +205,31 @@ export const tools: Tool[] = [
       required: ["text"],
     },
   },
+  {
+    name: "browser_record_start",
+    description: "Start recording the browser tab as video. Uses Chrome Debugger API (shows debugging banner). Max duration: 60 seconds. If 'execute' is provided, runs the JS code during recording and auto-stops when done, returning the video directly.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "number", description: "Optional: specific tab to record" },
+        maxDuration: { type: "number", description: "Max recording duration in ms (default: 30000, max: 60000)" },
+        execute: { type: "string", description: "JavaScript code to execute during recording. Recording auto-stops after execution and returns video." },
+      },
+      required: ["execute"],
+    },
+  },
+  {
+    name: "browser_execute",
+    description: "Execute JavaScript code in the browser tab. Returns the result of the expression. Useful for frontend testing, DOM manipulation, or extracting data.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        code: { type: "string", description: "JavaScript code to execute" },
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
+      required: ["code"],
+    },
+  },
 ];
 
 // Tool name to command mapping
@@ -223,6 +249,8 @@ const toolToCommand: Record<string, string> = {
   browser_find_text: "find_text",
   browser_press_key: "press_key",
   browser_paste: "paste",
+  browser_record_start: "record_start",
+  browser_execute: "execute",
 };
 
 // Handle tool calls
@@ -313,6 +341,106 @@ export async function handleToolCall(
         };
       }
       return { content: [{ type: "text", text: "Screenshot failed" }], isError: true };
+    }
+
+    // Record start - runs execute code and returns video
+    if (name === "browser_record_start") {
+      const result = (await sendCommand("record_start", {
+        tabId,
+        maxDuration: typedArgs.maxDuration,
+        execute: typedArgs.execute,
+      })) as {
+        success: boolean;
+        error?: string;
+        mode?: string;
+        frames?: Array<{ data: string; timestamp: number }>;
+        frameCount?: number;
+        duration?: number;
+        fps?: number;
+        executeResult?: unknown;
+        executeError?: string;
+      };
+
+      if (!result?.success) {
+        return {
+          content: [{ type: "text", text: result?.error || "Recording failed" }],
+          isError: true,
+        };
+      }
+
+      const frames = result.frames || [];
+      if (frames.length === 0) {
+        return {
+          content: [{ type: "text", text: "No frames captured" }],
+          isError: true,
+        };
+      }
+
+      // Convert frames to video using ffmpeg
+      const timestamp = Date.now();
+      const tempDir = `/tmp/helm-recording-${timestamp}`;
+      const outputPath = `/tmp/helm-recording-${timestamp}.webm`;
+
+      try {
+        await mkdir(tempDir, { recursive: true });
+
+        // Write frames as numbered JPEGs
+        for (let i = 0; i < frames.length; i++) {
+          const frameBuffer = Buffer.from(frames[i].data, "base64");
+          const framePath = `${tempDir}/frame_${String(i).padStart(5, "0")}.jpg`;
+          await writeFile(framePath, frameBuffer);
+        }
+
+        // Calculate FPS from actual frame timing
+        const fps = result.fps && result.fps > 0 ? result.fps : 10;
+
+        // Run ffmpeg to create video
+        execSync(
+          `ffmpeg -y -framerate ${fps} -i "${tempDir}/frame_%05d.jpg" -c:v libvpx-vp9 -b:v 1M -pix_fmt yuv420p "${outputPath}" 2>/dev/null`,
+          { timeout: 30000 }
+        );
+
+        // Clean up temp directory
+        await rm(tempDir, { recursive: true, force: true });
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  success: true,
+                  mode: "execute",
+                  videoPath: outputPath,
+                  frameCount: frames.length,
+                  duration: result.duration,
+                  fps,
+                  executeResult: result.executeResult,
+                  executeError: result.executeError,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (ffmpegError) {
+        // Clean up on error
+        try {
+          await rm(tempDir, { recursive: true, force: true });
+        } catch {
+          // Ignore cleanup errors
+        }
+        return {
+          content: [
+            {
+              type: "text",
+              text: `FFmpeg error: ${ffmpegError instanceof Error ? ffmpegError.message : String(ffmpegError)}. Make sure ffmpeg is installed.`,
+            },
+          ],
+          isError: true,
+        };
+      }
     }
 
     // Generic command handler

@@ -5,6 +5,8 @@ import { setWsPort, loadSessionWindows } from './state.js';
 import { connect, setupKeepaliveAlarm, sendMessage } from './websocket.js';
 import { setupWindowCloseListener } from './windows.js';
 import { setupPopupHandler } from './popup-handler.js';
+// Import handlers to register debugger event listener for recording
+import './handlers.js';
 
 // Setup tab close listener - notify server for routing cleanup
 function setupTabCloseListener() {
