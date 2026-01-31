@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Logs
+*.log
+
+# Daemon state files
+.daemon.pid
+.server.lock
+
+# Environment files
+.env
+.env.*
+
+# Certificates
+*.pem
+
+# Packed extensions
+packed/*.crx
+packed/*.zip
+
+# Bun lockfile (optional - regenerated on install)
+bun.lock
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

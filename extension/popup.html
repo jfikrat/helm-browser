@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    :root {
+      --bg-primary: #0f0f1a;
+      --bg-secondary: rgba(30, 30, 50, 0.8);
+      --bg-glass: rgba(20, 20, 35, 0.6);
+      --accent: #D97757;
+      --accent-light: #E5977A;
+      --accent-glow: rgba(217, 119, 87, 0.3);
+      --cyan: #C96442;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --error: #ef4444;
+      --text-primary: #f1f5f9;
+      --text-secondary: #94a3b8;
+      --border: rgba(217, 119, 87, 0.2);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      width: 340px;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      overflow: hidden;
+      margin: 0;
+      padding: 0;
+    }
+
+    .popup-container {
+      background: var(--bg-primary);
+    }
+
+    /* Header */
+    .header {
+      background: linear-gradient(135deg, var(--accent) 0%, var(--cyan) 100%);
+      padding: 20px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .header::before {
+      content: '';
+      position: absolute;
+      top: -50%;
+      left: -50%;
+      width: 200%;
+      height: 200%;
+      background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 60%);
+      animation: shimmer 3s ease-in-out infinite;
+    }
+
+    @keyframes shimmer {
+      0%, 100% { transform: translateX(-30%) translateY(-30%); }
+      50% { transform: translateX(30%) translateY(30%); }
+    }
+
+    .header-content {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .helm-icon {
+      width: 40px;
+      height: 40px;
+      background: rgba(255,255,255,0.15);
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 24px;
+      backdrop-filter: blur(10px);
+    }
+
+    .helm-icon img {
+      width: 28px;
+      height: 28px;
+    }
+
+    .header-text h1 {
+      font-size: 20px;
+      font-weight: 600;
+      letter-spacing: -0.5px;
+    }
+
+    .header-text .version {
+      font-size: 11px;
+      opacity: 0.8;
+      font-weight: 400;
+    }
+
+    /* Content */
+    .content {
+      padding: 16px;
+    }
+
+    /* Status Card */
+    .status-card {
+      background: var(--bg-glass);
+      backdrop-filter: blur(20px);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 16px;
+      margin-bottom: 16px;
+      transition: all 0.3s ease;
+    }
+
+    .status-card.connected {
+      border-color: rgba(16, 185, 129, 0.4);
+      box-shadow: 0 0 20px rgba(16, 185, 129, 0.1);
+    }
+
+    .status-card.disconnected {
+      border-color: rgba(239, 68, 68, 0.4);
+      box-shadow: 0 0 20px rgba(239, 68, 68, 0.1);
+    }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .status-indicator {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      position: relative;
+    }
+
+    .status-indicator.online {
+      background: var(--success);
+      box-shadow: 0 0 12px var(--success);
+    }
+
+    .status-indicator.online::after {
+      content: '';
+      position: absolute;
+      inset: -4px;
+      border-radius: 50%;
+      border: 2px solid var(--success);
+      animation: pulse 2s ease-out infinite;
+    }
+
+    .status-indicator.offline {
+      background: var(--error);
+      box-shadow: 0 0 12px var(--error);
+    }
+
+    @keyframes pulse {
+      0% { transform: scale(1); opacity: 0.8; }
+      100% { transform: scale(1.8); opacity: 0; }
+    }
+
+    .status-text {
+      flex: 1;
+    }
+
+    .status-text .label {
+      font-size: 14px;
+      font-weight: 500;
+    }
+
+    .status-text .info {
+      font-size: 11px;
+      color: var(--text-secondary);
+      margin-top: 2px;
+    }
+
+    /* Section */
+    .section {
+      margin-bottom: 16px;
+    }
+
+    .section-title {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .section-title::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: linear-gradient(90deg, var(--border), transparent);
+    }
+
+    /* Sessions List */
+    .sessions-list {
+      background: var(--bg-glass);
+      backdrop-filter: blur(20px);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      overflow: hidden;
+    }
+
+    .session-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .session-item:last-child {
+      border-bottom: none;
+    }
+
+    .session-item:hover {
+      background: rgba(217, 119, 87, 0.1);
+    }
+
+    .session-item.selected {
+      background: rgba(217, 119, 87, 0.15);
+      border-left: 3px solid var(--accent);
+      padding-left: 11px;
+    }
+
+    .session-info {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .session-label {
+      font-size: 13px;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .session-id {
+      font-size: 10px;
+      color: var(--text-secondary);
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .session-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .session-status {
+      font-size: 10px;
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-weight: 500;
+    }
+
+    .session-status.ready {
+      background: rgba(16, 185, 129, 0.15);
+      color: var(--success);
+    }
+
+    .session-status.busy {
+      background: rgba(245, 158, 11, 0.15);
+      color: var(--warning);
+    }
+
+    .session-status.offline {
+      background: rgba(239, 68, 68, 0.15);
+      color: var(--error);
+    }
+
+    .no-sessions {
+      padding: 24px;
+      text-align: center;
+      color: var(--text-secondary);
+      font-size: 13px;
+    }
+
+    .no-sessions-icon {
+      font-size: 24px;
+      margin-bottom: 8px;
+      opacity: 0.5;
+    }
+
+    /* Settings */
+    .settings-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: var(--bg-glass);
+      backdrop-filter: blur(20px);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 12px 14px;
+    }
+
+    .settings-row label {
+      font-size: 13px;
+      color: var(--text-secondary);
+      white-space: nowrap;
+    }
+
+    .settings-row input {
+      flex: 1;
+      padding: 8px 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: rgba(15, 15, 26, 0.8);
+      color: var(--text-primary);
+      font-size: 14px;
+      font-family: 'JetBrains Mono', monospace;
+      transition: all 0.2s ease;
+    }
+
+    .settings-row input:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+
+    /* Buttons */
+    .btn {
+      padding: 10px 16px;
+      border: none;
+      border-radius: 14px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent) 0%, var(--accent-light) 100%);
+      color: white;
+      width: 100%;
+      margin-top: 12px;
+    }
+
+    .btn-primary:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 20px var(--accent-glow);
+    }
+
+    .btn-primary:active {
+      transform: translateY(0);
+    }
+
+    .btn-sm {
+      padding: 6px 12px;
+      font-size: 11px;
+      border-radius: 8px;
+    }
+
+    .btn-secondary {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      color: var(--text-primary);
+    }
+
+    .btn-secondary:hover {
+      background: rgba(217, 119, 87, 0.2);
+      border-color: var(--accent);
+    }
+
+    .btn-success {
+      background: rgba(16, 185, 129, 0.2);
+      border: 1px solid rgba(16, 185, 129, 0.4);
+      color: var(--success);
+    }
+
+    .assign-btn {
+      width: auto;
+    }
+
+    /* Footer */
+    .footer {
+      text-align: center;
+      padding: 12px;
+      font-size: 11px;
+      color: var(--text-secondary);
+      border-top: 1px solid var(--border);
+      background: var(--bg-glass);
+    }
+
+    .footer a {
+      color: var(--accent-light);
+      text-decoration: none;
+    }
+
+    .footer a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <div class="popup-container">
+  <div class="header">
+    <div class="header-content">
+      <div class="helm-icon">
+        <img src="icon48.png" alt="Helm">
+      </div>
+      <div class="header-text">
+        <h1>Helm</h1>
+        <span class="version">Browser Control v2.0</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="content">
+    <div id="statusCard" class="status-card disconnected">
+      <div class="status-row">
+        <div id="statusIndicator" class="status-indicator offline"></div>
+        <div class="status-text">
+          <div id="statusLabel" class="label">Disconnected</div>
+          <div id="statusInfo" class="info">ws://localhost:9876</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Sessions</div>
+      <div id="sessionsList" class="sessions-list">
+        <div class="no-sessions">
+          <div class="no-sessions-icon">⎈</div>
+          <div>No sessions connected</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Settings</div>
+      <div class="settings-row">
+        <label for="port">Port</label>
+        <input type="number" id="port" value="9876" min="1024" max="65535">
+        <button id="savePort" class="btn btn-sm btn-secondary">Save</button>
+      </div>
+    </div>
+
+    <button id="reconnect" class="btn btn-primary">
+      <span>Reconnect</span>
+    </button>
+  </div>
+
+  <div class="footer">
+    Protocol v2 | <span id="serverInfo">ws://localhost:9876</span>
+  </div>
+  </div><!-- end popup-container -->
+
+  <script src="popup.js"></script>
+</body>
+</html>

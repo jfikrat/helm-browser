@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    :root {
+      --bg-primary: #0f0f1a;
+      --bg-glass: rgba(20, 20, 35, 0.8);
+      --accent: #D97757;
+      --accent-light: #E5977A;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --error: #ef4444;
+      --text-primary: #f1f5f9;
+      --text-secondary: #94a3b8;
+      --border: rgba(217, 119, 87, 0.2);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      min-height: 100vh;
+    }
+
+    /* Header */
+    .header {
+      background: linear-gradient(135deg, var(--accent) 0%, #C96442 100%);
+      padding: 20px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+
+    .header-content {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .helm-icon {
+      width: 40px;
+      height: 40px;
+      background: rgba(255,255,255,0.15);
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      backdrop-filter: blur(10px);
+    }
+
+    .helm-icon img {
+      width: 28px;
+      height: 28px;
+    }
+
+    .header-text h1 {
+      font-size: 20px;
+      font-weight: 600;
+    }
+
+    .header-text .version {
+      font-size: 11px;
+      opacity: 0.8;
+    }
+
+    /* Status */
+    .status-card {
+      margin: 16px;
+      padding: 16px;
+      background: var(--bg-glass);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .status-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--error);
+    }
+
+    .status-dot.online {
+      background: var(--success);
+      box-shadow: 0 0 12px var(--success);
+      animation: pulse 2s ease-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
+    }
+
+    .status-text {
+      flex: 1;
+    }
+
+    .status-label {
+      font-size: 14px;
+      font-weight: 500;
+    }
+
+    .status-info {
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+
+    /* Section */
+    .section {
+      padding: 0 16px 16px;
+    }
+
+    .section-title {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 12px;
+    }
+
+    /* Sessions */
+    .sessions-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .session-card {
+      background: var(--bg-glass);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 14px;
+      transition: all 0.2s ease;
+    }
+
+    .session-card:hover {
+      border-color: var(--accent);
+      background: rgba(217, 119, 87, 0.1);
+    }
+
+    .session-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+
+    .session-label {
+      font-size: 14px;
+      font-weight: 500;
+    }
+
+    .session-status {
+      font-size: 10px;
+      padding: 4px 10px;
+      border-radius: 10px;
+      font-weight: 500;
+    }
+
+    .session-status.ready {
+      background: rgba(16, 185, 129, 0.2);
+      color: var(--success);
+    }
+
+    .session-status.pending {
+      background: rgba(245, 158, 11, 0.2);
+      color: var(--warning);
+    }
+
+    .session-id {
+      font-size: 10px;
+      color: var(--text-secondary);
+      font-family: monospace;
+      margin-bottom: 10px;
+    }
+
+    .session-actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    .btn {
+      flex: 1;
+      padding: 10px 16px;
+      border: none;
+      border-radius: 12px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent) 0%, var(--accent-light) 100%);
+      color: white;
+    }
+
+    .btn-primary:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 15px rgba(217, 119, 87, 0.4);
+    }
+
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.1);
+      color: var(--text-primary);
+      border: 1px solid var(--border);
+    }
+
+    .btn-secondary:hover {
+      background: rgba(217, 119, 87, 0.2);
+      border-color: var(--accent);
+    }
+
+    /* No sessions */
+    .no-sessions {
+      text-align: center;
+      padding: 40px 20px;
+      color: var(--text-secondary);
+    }
+
+    .no-sessions-icon {
+      font-size: 48px;
+      margin-bottom: 12px;
+      opacity: 0.5;
+    }
+
+    /* Settings */
+    .settings-card {
+      background: var(--bg-glass);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 14px;
+    }
+
+    .settings-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .settings-row label {
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+
+    .settings-row input {
+      flex: 1;
+      padding: 10px 14px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: rgba(15, 15, 26, 0.8);
+      color: var(--text-primary);
+      font-size: 14px;
+      font-family: monospace;
+    }
+
+    .settings-row input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .reconnect-btn {
+      margin-top: 12px;
+      width: 100%;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="header-content">
+      <div class="helm-icon">
+        <img src="icon48.png" alt="Helm">
+      </div>
+      <div class="header-text">
+        <h1>Helm</h1>
+        <span class="version">Browser Control v2.0</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="status-card">
+    <div class="status-dot" id="statusDot"></div>
+    <div class="status-text">
+      <div class="status-label" id="statusLabel">Disconnected</div>
+      <div class="status-info" id="statusInfo">ws://localhost:9876</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Sessions</div>
+    <div class="sessions-list" id="sessionsList">
+      <div class="no-sessions">
+        <div class="no-sessions-icon">⎈</div>
+        <div>No sessions connected</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Settings</div>
+    <div class="settings-card">
+      <div class="settings-row">
+        <label>Port</label>
+        <input type="number" id="portInput" value="9876" min="1024" max="65535">
+        <button class="btn btn-secondary" id="savePort">Save</button>
+      </div>
+      <button class="btn btn-primary reconnect-btn" id="reconnect">Reconnect</button>
+    </div>
+  </div>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>

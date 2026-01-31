@@ -1,0 +1,21 @@
+{
+  "name": "helm-browser-server",
+  "version": "1.0.0",
+  "description": "Browser control MCP server for AI assistants",
+  "type": "module",
+  "author": "Fekrat",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jfikrat/helm-browser"
+  },
+  "homepage": "https://github.com/jfikrat/helm-browser",
+  "keywords": ["mcp", "browser", "automation", "ai", "claude", "gemini"],
+  "scripts": {
+    "start": "bun run index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "sharp": "^0.34.5"
+  }
+}
