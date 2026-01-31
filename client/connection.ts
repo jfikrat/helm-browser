@@ -15,6 +15,7 @@ import {
   pendingRequests,
   generateRequestId,
 } from "./state.js";
+import { buildSessionLabel } from "./label.js";
 
 // Retry settings
 const MAX_RETRIES = 5;
@@ -23,9 +24,9 @@ const INITIAL_DELAY_MS = 1000;
 let retryCount = 0;
 let keepaliveInterval: ReturnType<typeof setInterval> | null = null;
 
-// Generate session ID from working directory
+// Generate unique session ID
 function generateSessionId(): string {
-  return `claude-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  return `mcp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 // Get short directory name for label
@@ -45,19 +46,23 @@ export async function connectToDaemon(): Promise<void> {
       console.error("[Client] Connected to daemon");
       retryCount = 0;
 
-      // Generate and register session
+      // Generate session ID
       const sessionId = generateSessionId();
       setMySessionId(sessionId);
 
-      const label = process.env.HELM_SESSION_LABEL || `MCP Client (${getShortCwd()})`;
-
-      ws.send(
-        JSON.stringify({
-          type: "register",
-          sessionId,
-          label,
-        })
-      );
+      // Build label with auto-detection (async)
+      const shortCwd = getShortCwd();
+      buildSessionLabel(shortCwd)
+        .catch(() => `MCP Client (${shortCwd}) #${process.pid}`)
+        .then((label) => {
+          ws.send(
+            JSON.stringify({
+              type: "register",
+              sessionId,
+              label,
+            })
+          );
+        });
 
       // Start keepalive
       if (keepaliveInterval) {
