@@ -95,12 +95,20 @@ function pickBest(...hits: Array<Hit | null>): Hit | null {
   return valid.sort((a, b) => b.confidence - a.confidence)[0] || null;
 }
 
+// Extract short suffix from session ID for uniqueness
+function getShortId(sessionId: string): string {
+  const tail = sessionId.split("-").pop() || "";
+  return tail.slice(-4) || process.pid.toString(36).slice(-4);
+}
+
 // Build session label with auto-detection
-export async function buildSessionLabel(baseCwd: string): Promise<string> {
+export async function buildSessionLabel(baseCwd: string, sessionId: string): Promise<string> {
   // If explicitly set, use that
   if (process.env.HELM_SESSION_LABEL) {
     return process.env.HELM_SESSION_LABEL;
   }
+
+  const shortId = getShortId(sessionId);
 
   // Try to detect the AI client
   const hit = pickBest(
@@ -111,9 +119,9 @@ export async function buildSessionLabel(baseCwd: string): Promise<string> {
 
   if (hit) {
     console.error(`[Client] Detected AI client: ${hit.name} (${hit.source}, confidence: ${hit.confidence})`);
-    return `${hit.name} (${baseCwd})`;
+    return `${hit.name} (${baseCwd}) · ${shortId}`;
   }
 
-  // Fallback: generic label with PID for uniqueness
-  return `MCP Client (${baseCwd}) #${process.pid}`;
+  // Fallback: generic label with short ID for uniqueness
+  return `MCP Client (${baseCwd}) · ${shortId}`;
 }

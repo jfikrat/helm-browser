@@ -52,8 +52,8 @@ export async function connectToDaemon(): Promise<void> {
 
       // Build label with auto-detection (async)
       const shortCwd = getShortCwd();
-      buildSessionLabel(shortCwd)
-        .catch(() => `MCP Client (${shortCwd}) #${process.pid}`)
+      buildSessionLabel(shortCwd, sessionId)
+        .catch(() => `MCP Client (${shortCwd}) · ${sessionId.split("-").pop()?.slice(-4) || "unk"}`)
         .then((label) => {
           ws.send(
             JSON.stringify({
