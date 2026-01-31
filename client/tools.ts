@@ -206,14 +206,14 @@ export const tools: Tool[] = [
     },
   },
   {
-    name: "browser_record_start",
-    description: "Start recording the browser tab as video. Uses Chrome Debugger API (shows debugging banner). Max duration: 60 seconds. If 'execute' is provided, runs the JS code during recording and auto-stops when done, returning the video directly.",
+    name: "browser_record",
+    description: "Record browser tab as video while executing JavaScript code. Uses Chrome Debugger API. Returns video file path after execution completes.",
     inputSchema: {
       type: "object",
       properties: {
+        execute: { type: "string", description: "JavaScript code to execute during recording. Supports async/await." },
+        duration: { type: "string", enum: ["5s", "10s", "15s"], description: "Max recording duration (default: 10s)" },
         tabId: { type: "number", description: "Optional: specific tab to record" },
-        maxDuration: { type: "number", description: "Max recording duration in ms (default: 30000, max: 60000)" },
-        execute: { type: "string", description: "JavaScript code to execute during recording. Recording auto-stops after execution and returns video." },
       },
       required: ["execute"],
     },
@@ -249,7 +249,7 @@ const toolToCommand: Record<string, string> = {
   browser_find_text: "find_text",
   browser_press_key: "press_key",
   browser_paste: "paste",
-  browser_record_start: "record_start",
+  browser_record: "record_start",
   browser_execute: "execute",
 };
 
@@ -343,11 +343,15 @@ export async function handleToolCall(
       return { content: [{ type: "text", text: "Screenshot failed" }], isError: true };
     }
 
-    // Record start - runs execute code and returns video
-    if (name === "browser_record_start") {
+    // Record - runs execute code and returns video
+    if (name === "browser_record") {
+      // Convert duration string to ms (default: 10s)
+      const durationMap: Record<string, number> = { "5s": 5000, "10s": 10000, "15s": 15000 };
+      const maxDuration = durationMap[typedArgs.duration as string] || 10000;
+
       const result = (await sendCommand("record_start", {
         tabId,
-        maxDuration: typedArgs.maxDuration,
+        maxDuration,
         execute: typedArgs.execute,
       })) as {
         success: boolean;
