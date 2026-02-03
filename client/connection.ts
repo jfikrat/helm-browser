@@ -20,8 +20,34 @@ import { buildSessionLabel } from "./label.js";
 // Retry settings
 const MAX_RETRIES = 5;
 const INITIAL_DELAY_MS = 1000;
+const DAEMON_START_WAIT_MS = 2000;
 
 let retryCount = 0;
+
+// Try to start daemon via systemctl (best effort)
+async function tryStartDaemon(): Promise<boolean> {
+  const { spawn } = await import("child_process");
+
+  console.error("[Client] Attempting to start daemon via systemctl...");
+
+  const start = spawn("systemctl", ["--user", "start", "helm-daemon"]);
+  const success = await new Promise<boolean>((resolve) => {
+    start.on("close", (code) => resolve(code === 0));
+    start.on("error", () => resolve(false));
+  });
+
+  if (success) {
+    console.error(`[Client] Waiting ${DAEMON_START_WAIT_MS}ms for daemon to start...`);
+    await new Promise((resolve) => setTimeout(resolve, DAEMON_START_WAIT_MS));
+  }
+
+  return success;
+}
+
+// No-op for backward compatibility (daemon check now happens in connectToDaemon)
+export async function ensureDaemonRunning(): Promise<void> {
+  // Intentionally empty - WebSocket connection will handle daemon availability
+}
 let keepaliveInterval: ReturnType<typeof setInterval> | null = null;
 
 // Generate unique session ID
@@ -36,99 +62,118 @@ function getShortCwd(): string {
   return parts[parts.length - 1] || "root";
 }
 
-// Connect to daemon
+// Connect to daemon (with auto-start fallback)
 export async function connectToDaemon(): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://localhost:${WS_PORT}`);
-    setDaemonWs(ws);
+  let connectionFailed = false;
+  let wasConnected = false;
 
-    ws.onopen = () => {
-      console.error("[Client] Connected to daemon");
-      retryCount = 0;
+  const attemptConnection = (tryDaemonStart: boolean): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(`ws://localhost:${WS_PORT}`);
+      setDaemonWs(ws);
 
-      // Generate session ID
-      const sessionId = generateSessionId();
-      setMySessionId(sessionId);
+      ws.onopen = () => {
+        console.error("[Client] Connected to daemon");
+        wasConnected = true;
+        retryCount = 0;
 
-      // Build label with auto-detection (async)
-      const shortCwd = getShortCwd();
-      buildSessionLabel(shortCwd, sessionId)
-        .catch(() => `MCP Client (${shortCwd}) · ${sessionId.split("-").pop()?.slice(-4) || "unk"}`)
-        .then((label) => {
-          ws.send(
-            JSON.stringify({
-              type: "register",
-              sessionId,
-              label,
-            })
-          );
-        });
+        // Generate session ID
+        const sessionId = generateSessionId();
+        setMySessionId(sessionId);
 
-      // Start keepalive
-      if (keepaliveInterval) {
-        clearInterval(keepaliveInterval);
-      }
-      keepaliveInterval = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN && mySessionId) {
-          ws.send(
-            JSON.stringify({
-              type: "keepalive",
-              sessionId: mySessionId,
-            })
-          );
-        }
-      }, CLIENT_KEEPALIVE_INTERVAL_MS);
-    };
-
-    ws.onerror = (error) => {
-      console.error("[Client] Connection error:", error);
-    };
-
-    ws.onclose = () => {
-      console.error("[Client] Connection closed");
-      setDaemonWs(null);
-      setRegistered(false);
-
-      // Clear keepalive
-      if (keepaliveInterval) {
-        clearInterval(keepaliveInterval);
-        keepaliveInterval = null;
-      }
-
-      // Reject all pending requests
-      for (const [reqId, pending] of pendingRequests) {
-        clearTimeout(pending.timeout);
-        pending.reject(new Error("Connection to daemon lost"));
-      }
-      pendingRequests.clear();
-
-      // Retry connection
-      if (retryCount < MAX_RETRIES) {
-        const delay = INITIAL_DELAY_MS * Math.pow(2, retryCount);
-        retryCount++;
-        console.error(
-          `[Client] Reconnecting in ${delay}ms (attempt ${retryCount}/${MAX_RETRIES})`
-        );
-        setTimeout(() => {
-          connectToDaemon().catch((err) => {
-            console.error("[Client] Reconnect failed:", err);
+        // Build label with auto-detection (async)
+        const shortCwd = getShortCwd();
+        buildSessionLabel(shortCwd, sessionId)
+          .catch(() => `MCP Client (${shortCwd}) · ${sessionId.split("-").pop()?.slice(-4) || "unk"}`)
+          .then((label) => {
+            ws.send(
+              JSON.stringify({
+                type: "register",
+                sessionId,
+                label,
+              })
+            );
           });
-        }, delay);
-      } else {
-        console.error("[Client] Max reconnect attempts reached");
-        process.exit(1);
-      }
-    };
 
-    ws.onmessage = (event) => {
-      try {
-        const message = JSON.parse(event.data.toString()) as DaemonMessage;
-        handleDaemonMessage(message, resolve, reject);
-      } catch (error) {
-        console.error("[Client] Error parsing message:", error);
-      }
-    };
-  });
+        // Start keepalive
+        if (keepaliveInterval) {
+          clearInterval(keepaliveInterval);
+        }
+        keepaliveInterval = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN && mySessionId) {
+            ws.send(
+              JSON.stringify({
+                type: "keepalive",
+                sessionId: mySessionId,
+              })
+            );
+          }
+        }, CLIENT_KEEPALIVE_INTERVAL_MS);
+      };
+
+      ws.onerror = () => {
+        connectionFailed = true;
+      };
+
+      ws.onclose = async () => {
+        setDaemonWs(null);
+        setRegistered(false);
+
+        // Clear keepalive
+        if (keepaliveInterval) {
+          clearInterval(keepaliveInterval);
+          keepaliveInterval = null;
+        }
+
+        // Reject all pending requests
+        for (const [reqId, pending] of pendingRequests) {
+          clearTimeout(pending.timeout);
+          pending.reject(new Error("Connection to daemon lost"));
+        }
+        pendingRequests.clear();
+
+        // Initial connection failed - try starting daemon
+        if (connectionFailed && !wasConnected && tryDaemonStart) {
+          console.error("[Client] Daemon not reachable, attempting to start...");
+          const started = await tryStartDaemon();
+          if (started) {
+            attemptConnection(false).then(resolve).catch(reject);
+          } else {
+            reject(new Error("Failed to connect to daemon and could not start it"));
+          }
+          return;
+        }
+
+        // Connection lost after successful connection - retry
+        if (wasConnected && retryCount < MAX_RETRIES) {
+          const delay = INITIAL_DELAY_MS * Math.pow(2, retryCount);
+          retryCount++;
+          console.error(
+            `[Client] Connection lost, reconnecting in ${delay}ms (attempt ${retryCount}/${MAX_RETRIES})`
+          );
+          setTimeout(() => {
+            connectToDaemon().catch((err) => {
+              console.error("[Client] Reconnect failed:", err);
+            });
+          }, delay);
+        } else if (wasConnected && retryCount >= MAX_RETRIES) {
+          console.error("[Client] Max reconnect attempts reached");
+          process.exit(1);
+        }
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data.toString()) as DaemonMessage;
+          handleDaemonMessage(message, resolve, reject);
+        } catch (error) {
+          console.error("[Client] Error parsing message:", error);
+        }
+      };
+    });
+  };
+
+  return attemptConnection(true);
 }
 
 // Handle messages from daemon

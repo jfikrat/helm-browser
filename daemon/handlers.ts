@@ -159,7 +159,8 @@ export function handleExtensionMessage(
       break;
 
     case "keepalive":
-      // Ignore
+    case "pong":
+      // Ignore - connection is alive
       break;
 
     default:

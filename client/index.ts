@@ -10,7 +10,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { mySessionId } from "./state.js";
-import { connectToDaemon, disconnectFromDaemon } from "./connection.js";
+import { connectToDaemon, disconnectFromDaemon, ensureDaemonRunning } from "./connection.js";
 import { tools, handleToolCall } from "./tools.js";
 
 // MCP Server setup
@@ -53,13 +53,20 @@ process.on("SIGTERM", () => {
 async function main(): Promise<void> {
   console.error(`[Client] Helm MCP Client v3.0 starting...`);
 
+  // Ensure daemon is running before connecting
+  try {
+    await ensureDaemonRunning();
+  } catch (error) {
+    console.error("[Client] Failed to ensure daemon is running:", error);
+    process.exit(1);
+  }
+
   // Connect to daemon
   try {
     await connectToDaemon();
     console.error(`[Client] Connected to daemon (session: ${mySessionId})`);
   } catch (error) {
     console.error("[Client] Failed to connect to daemon:", error);
-    console.error("[Client] Make sure helm-daemon is running: systemctl --user start helm-daemon");
     process.exit(1);
   }
 

@@ -22,23 +22,23 @@ function getWsUrl() {
   return `ws://localhost:${wsPort}`;
 }
 
-// Setup alarm-based keepalive (survives service worker sleep)
+// Setup alarm-based keepalive (backup - daemon sends pings to keep us alive)
 export function setupKeepaliveAlarm() {
-  chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.4 }); // ~24 seconds
+  // 1 minute is Chrome's minimum for alarms
+  chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 1 });
 
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === KEEPALIVE_ALARM) {
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         console.log('[Helm] Alarm: reconnecting...');
         connect();
-      } else {
-        ws.send(JSON.stringify({ type: 'keepalive' }));
       }
+      // No need to send keepalive - daemon sends pings every 25s
     }
   });
 }
 
-// Start keepalive interval (backup)
+// Start keepalive interval (backup - daemon handles primary keepalive via ping)
 export function startKeepAlive() {
   if (keepAliveInterval) return;
   setKeepAliveInterval(
@@ -46,7 +46,7 @@ export function startKeepAlive() {
       if (ws?.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'keepalive' }));
       }
-    }, 25000)
+    }, 45000) // Reduced frequency - daemon pings every 25s
   );
 }
 

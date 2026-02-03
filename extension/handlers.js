@@ -68,6 +68,11 @@ export async function handleServerMessage(message) {
       console.error('[Helm] Server error:', message.payload);
       break;
 
+    case 'ping':
+      // Respond to keep connection alive (wakes up Service Worker)
+      sendMessage({ type: 'pong' });
+      break;
+
     default:
       // Legacy format support (v1 protocol)
       if (message.id && message.command) {

@@ -30,6 +30,33 @@ declare const Bun: {
 // Client stale check interval
 let staleCheckInterval: ReturnType<typeof setInterval> | null = null;
 
+// Extension ping interval (keeps Service Worker alive)
+const EXTENSION_PING_INTERVAL_MS = 25000;
+let extensionPingInterval: ReturnType<typeof setInterval> | null = null;
+
+// Start pinging extension to keep Service Worker alive
+function startExtensionPing(): void {
+  if (extensionPingInterval) return;
+
+  extensionPingInterval = setInterval(() => {
+    if (extensionConnection?.ws) {
+      try {
+        (extensionConnection.ws as any).send(JSON.stringify({ type: "ping" }));
+      } catch (e) {
+        // Connection lost, will be handled by close event
+      }
+    }
+  }, EXTENSION_PING_INTERVAL_MS);
+}
+
+// Stop pinging extension
+function stopExtensionPing(): void {
+  if (extensionPingInterval) {
+    clearInterval(extensionPingInterval);
+    extensionPingInterval = null;
+  }
+}
+
 // Start the WebSocket server
 export async function startServer(): Promise<void> {
   Bun.serve({
@@ -124,6 +151,9 @@ export async function startServer(): Promise<void> {
     }
   }, CLIENT_KEEPALIVE_TIMEOUT_MS / 2);
 
+  // Start extension ping (keeps Service Worker alive)
+  startExtensionPing();
+
   console.error(`[Daemon] WebSocket server listening on ws://localhost:${WS_PORT}`);
 }
 
@@ -133,6 +163,8 @@ export function stopServer(): void {
     clearInterval(staleCheckInterval);
     staleCheckInterval = null;
   }
+
+  stopExtensionPing();
 
   // Close all client connections
   for (const [sessionId, session] of clientSessions) {

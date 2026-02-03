@@ -22,6 +22,18 @@ function setupActionClick() {
   });
 }
 
+// Handle Chrome startup - reconnect immediately
+chrome.runtime.onStartup.addListener(() => {
+  console.log('[Helm] Chrome started, reconnecting...');
+  connect();
+});
+
+// Handle extension install/update - reconnect immediately
+chrome.runtime.onInstalled.addListener((details) => {
+  console.log(`[Helm] Extension ${details.reason}, reconnecting...`);
+  connect();
+});
+
 // Initialize extension
 async function init() {
   console.log('[Helm] Initializing...');
