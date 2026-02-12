@@ -230,6 +230,17 @@ export const tools: Tool[] = [
       required: ["code"],
     },
   },
+  {
+    name: "browser_get_cookies",
+    description: "Get cookies for a URL (includes HttpOnly cookies via chrome.cookies API)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "URL to get cookies for (e.g. https://grok.com)" },
+        name: { type: "string", description: "Optional: specific cookie name to filter" },
+      },
+    },
+  },
 ];
 
 // Tool name to command mapping
@@ -251,6 +262,7 @@ const toolToCommand: Record<string, string> = {
   browser_paste: "paste",
   browser_record: "record_start",
   browser_execute: "execute",
+  browser_get_cookies: "get_cookies",
 };
 
 // Handle tool calls

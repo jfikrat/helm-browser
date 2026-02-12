@@ -210,6 +210,17 @@ export const tools: Tool[] = [
       required: ["text"],
     },
   },
+  {
+    name: "browser_get_cookies",
+    description: "Get cookies for a URL (includes HttpOnly cookies via chrome.cookies API)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "URL to get cookies for (e.g. https://grok.com)" },
+        name: { type: "string", description: "Optional: specific cookie name to filter" },
+      },
+    },
+  },
 ];
 
 // Tool name to command mapping
@@ -229,6 +240,7 @@ const toolToCommand: Record<string, string> = {
   browser_find_text: "find_text",
   browser_press_key: "press_key",
   browser_paste: "paste",
+  browser_get_cookies: "get_cookies",
 };
 
 // Handle tool calls

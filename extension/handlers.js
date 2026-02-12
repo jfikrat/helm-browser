@@ -258,6 +258,10 @@ async function handleCommand(command, params) {
     case 'record_start':
       return await recordStart(params.tabId, params.sessionId, params.maxDuration, params.execute);
 
+    // Cookies
+    case 'get_cookies':
+      return await getCookies(params.url, params.name);
+
     // Misc
     case 'ping':
       return { status: 'pong' };
@@ -265,4 +269,24 @@ async function handleCommand(command, params) {
     default:
       throw new Error(`Unknown command: ${command}`);
   }
+}
+
+// Get cookies via chrome.cookies API (includes HttpOnly)
+async function getCookies(url, name) {
+  const params = {};
+  if (url) params.url = url;
+  if (name) params.name = name;
+
+  const cookies = await chrome.cookies.getAll(params);
+  return {
+    cookies: cookies.map((c) => ({
+      name: c.name,
+      value: c.value,
+      domain: c.domain,
+      httpOnly: c.httpOnly,
+      secure: c.secure,
+      expirationDate: c.expirationDate,
+    })),
+    cookieString: cookies.map((c) => c.name + '=' + c.value).join('; '),
+  };
 }
