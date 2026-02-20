@@ -111,11 +111,17 @@ export interface ExtensionTabClosedMessage {
   };
 }
 
+export interface ExtensionWindowClosedMessage {
+  type: "window_closed";
+  payload: { sessionId: string; windowId: number };
+}
+
 export type ExtensionMessage =
   | ExtensionHelloMessage
   | ExtensionRouteResultMessage
   | ExtensionErrorMessage
   | ExtensionTabClosedMessage
+  | ExtensionWindowClosedMessage
   | { type: string; [key: string]: unknown };
 
 // ============================================

@@ -1,6 +1,7 @@
 // Helm - Window Isolation
 
 import { sessionWindows, setSessionWindow, removeSessionWindow } from './state.js';
+import { sendMessage } from './websocket.js';
 
 // Physical window size for optimal AI vision coordinate prediction
 // Window: 1310x890 → Viewport: ~1310x800
@@ -18,6 +19,10 @@ export function setupWindowCloseListener() {
         console.log(
           `[Helm] Window ${windowId} closed, removed mapping for session ${sessionId}`
         );
+        sendMessage({
+          type: 'window_closed',
+          payload: { sessionId, windowId },
+        });
       }
     }
   });

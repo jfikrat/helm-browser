@@ -38,15 +38,13 @@ export async function getTargetTab(tabId, sessionId) {
     throw new Error('No tabs in session window');
   }
 
-  // Fallback: active tab in current window (no isolation)
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-
-  // Auto-register this window for the session
-  if (sessionId && tab) {
-    setSessionWindow(sessionId, tab.windowId);
-    console.log(`[Helm] Auto-registered window ${tab.windowId} for session ${sessionId}`);
+  // sessionId varken windowId yoksa → hard error (window kapanmış veya hiç açılmamış)
+  if (sessionId) {
+    throw new Error(`Session ${sessionId} has no window. Use browser_navigate first.`);
   }
 
+  // Fallback: active tab in current window (sessionId yoksa legacy kullanım)
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab;
 }
 

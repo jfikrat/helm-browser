@@ -104,6 +104,9 @@ export async function navigate(url, tabId, sessionId) {
 // Take screenshot (full page or element)
 export async function screenshot(tabId, sessionId, selector = null) {
   const windowId = getWindowIdForSession(sessionId);
+  if (sessionId && !windowId) {
+    throw new Error(`Session ${sessionId} has no window assigned. Use browser_navigate first.`);
+  }
   const captureWindowId = windowId || null;
 
   // Get element bounds if selector provided

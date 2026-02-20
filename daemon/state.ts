@@ -113,6 +113,8 @@ export function setClientWindowId(
     session.windowId = windowId;
     if (windowId !== null) {
       windowCache.add(sessionId);
+    } else {
+      windowCache.delete(sessionId);
     }
   }
 }

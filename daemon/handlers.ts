@@ -109,12 +109,15 @@ async function handleCommand(
   if (!windowCache.has(sessionId)) {
     try {
       const result = await sendCommandToExtension("create_window", { sessionId }, sessionId);
-      if ((result as any)?.windowId) {
-        setClientWindowId(sessionId, (result as any).windowId);
-        console.error(`[Daemon] Lazy window created: ${(result as any).windowId} for session ${sessionId}`);
+      if (!(result as any)?.windowId) {
+        throw new Error('Window creation failed: no windowId returned');
       }
+      setClientWindowId(sessionId, (result as any).windowId);
+      console.error(`[Daemon] Lazy window created: ${(result as any).windowId} for session ${sessionId}`);
     } catch (error) {
       console.error(`[Daemon] Failed to create window for session ${sessionId}:`, error);
+      sendErrorToClient(clientWs, reqId, sessionId, "WINDOW_CREATION_FAILED", error instanceof Error ? error.message : String(error));
+      return;
     }
   }
 
@@ -156,6 +159,10 @@ export function handleExtensionMessage(
 
     case "tab_closed":
       handleTabClosed(message);
+      break;
+
+    case "window_closed":
+      handleWindowClosed(message);
       break;
 
     case "keepalive":
@@ -226,6 +233,14 @@ function handleTabClosed(message: ExtensionMessage): void {
   if (tabId !== undefined && tabRouting.has(tabId)) {
     tabRouting.delete(tabId);
     console.error(`[Daemon] Tab ${tabId} removed from routing`);
+  }
+}
+
+function handleWindowClosed(message: ExtensionMessage): void {
+  const { sessionId } = (message as any).payload || {};
+  if (sessionId) {
+    setClientWindowId(sessionId, null);
+    console.error(`[Daemon] Window closed for session ${sessionId}, cache cleared`);
   }
 }
 
