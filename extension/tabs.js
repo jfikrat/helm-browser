@@ -11,7 +11,7 @@ export async function getTargetTab(tabId, sessionId) {
   if (!sessionId) {
     console.warn('[Helm] getTargetTab called without sessionId - isolation bypassed');
   } else if (!windowId) {
-    console.warn(`[Helm] Session ${sessionId} has no window yet - using fallback`);
+    console.warn(`[Helm] Session ${sessionId} has no window - command will fail`);
   }
 
   if (tabId !== undefined) {
@@ -20,10 +20,9 @@ export async function getTargetTab(tabId, sessionId) {
     if (windowId && tab.windowId !== windowId) {
       throw new Error(`Tab ${tabId} does not belong to this session's window`);
     }
-    // Auto-register window if session has none
+    // sessionId varken windowId yoksa → hard error (auto-register cross-session leak'e yol açar)
     if (sessionId && !windowId) {
-      setSessionWindow(sessionId, tab.windowId);
-      console.log(`[Helm] Auto-registered window ${tab.windowId} for session ${sessionId}`);
+      throw new Error(`Session ${sessionId} has no window. Use browser_navigate first.`);
     }
     return tab;
   }

@@ -126,13 +126,29 @@ async function handleCommand(
     const result = await sendCommandToExtension(command, params, sessionId);
     sendResponseToClient(clientWs, reqId, sessionId, result);
   } catch (error) {
-    sendErrorToClient(
-      clientWs,
-      reqId,
-      sessionId,
-      "COMMAND_FAILED",
-      error instanceof Error ? error.message : String(error)
-    );
+    const errMsg = error instanceof Error ? error.message : String(error);
+
+    // Self-heal: missed window_closed event → windowCache stale → extension "has no window"
+    // Cache'i temizle, yeni window aç, komutu bir kez tekrar dene
+    if (errMsg.includes("has no window") && windowCache.has(sessionId)) {
+      console.error(`[Daemon] Self-heal triggered for session ${sessionId}: ${errMsg}`);
+      setClientWindowId(sessionId, null);
+      try {
+        const newWindow = await sendCommandToExtension("create_window", { sessionId }, sessionId);
+        if (!(newWindow as any)?.windowId) throw new Error("Window recreation failed: no windowId");
+        setClientWindowId(sessionId, (newWindow as any).windowId);
+        console.error(`[Daemon] Self-heal: new window ${(newWindow as any).windowId} for session ${sessionId}`);
+        const retryResult = await sendCommandToExtension(command, params, sessionId);
+        sendResponseToClient(clientWs, reqId, sessionId, retryResult);
+        return;
+      } catch (retryError) {
+        console.error(`[Daemon] Self-heal failed for session ${sessionId}:`, retryError);
+        sendErrorToClient(clientWs, reqId, sessionId, "WINDOW_CREATION_FAILED", retryError instanceof Error ? retryError.message : String(retryError));
+        return;
+      }
+    }
+
+    sendErrorToClient(clientWs, reqId, sessionId, "COMMAND_FAILED", errMsg);
   }
 }
 
@@ -237,11 +253,24 @@ function handleTabClosed(message: ExtensionMessage): void {
 }
 
 function handleWindowClosed(message: ExtensionMessage): void {
-  const { sessionId } = (message as any).payload || {};
-  if (sessionId) {
-    setClientWindowId(sessionId, null);
-    console.error(`[Daemon] Window closed for session ${sessionId}, cache cleared`);
+  const { sessionId, windowId } = (message as any).payload || {};
+  if (!sessionId) return;
+
+  const session = clientSessions.get(sessionId);
+  if (!session) return;
+
+  // Out-of-order/gecikmiş window_closed'ı yoksay:
+  // session yeni bir window'a geçmişse eski event'i işleme
+  if (session.windowId !== null && session.windowId !== windowId) {
+    console.error(
+      `[Daemon] Ignoring stale window_closed for session ${sessionId}: ` +
+      `current=${session.windowId}, event=${windowId}`
+    );
+    return;
   }
+
+  setClientWindowId(sessionId, null);
+  console.error(`[Daemon] Window ${windowId} closed for session ${sessionId}, cache cleared`);
 }
 
 function handleLegacyMessage(message: ExtensionMessage): void {
