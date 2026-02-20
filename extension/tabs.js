@@ -1,7 +1,6 @@
 // Helm - Tab Management
 
 import { getWindowIdForSession } from './windows.js';
-import { setSessionWindow } from './state.js';
 
 // Get target tab with window isolation
 export async function getTargetTab(tabId, sessionId) {
@@ -22,7 +21,7 @@ export async function getTargetTab(tabId, sessionId) {
     }
     // sessionId varken windowId yoksa → hard error (auto-register cross-session leak'e yol açar)
     if (sessionId && !windowId) {
-      throw new Error(`Session ${sessionId} has no window. Use browser_navigate first.`);
+      throw new Error(`ERR_NO_WINDOW: Session ${sessionId} has no window. Use browser_navigate first.`);
     }
     return tab;
   }
@@ -39,7 +38,7 @@ export async function getTargetTab(tabId, sessionId) {
 
   // sessionId varken windowId yoksa → hard error (window kapanmış veya hiç açılmamış)
   if (sessionId) {
-    throw new Error(`Session ${sessionId} has no window. Use browser_navigate first.`);
+    throw new Error(`ERR_NO_WINDOW: Session ${sessionId} has no window. Use browser_navigate first.`);
   }
 
   // Fallback: active tab in current window (sessionId yoksa legacy kullanım)
@@ -54,7 +53,7 @@ export async function getTabs(sessionId) {
   if (!sessionId) {
     console.warn('[Helm] getTabs called without sessionId - returning all tabs');
   } else if (!windowId) {
-    console.warn(`[Helm] Session ${sessionId} has no window - returning all tabs`);
+    throw new Error(`ERR_NO_WINDOW: Session ${sessionId} has no window. Use browser_navigate first.`);
   }
 
   const query = windowId ? { windowId } : {};
@@ -91,7 +90,7 @@ export async function newTab(url, sessionId) {
   if (!sessionId) {
     console.warn('[Helm] newTab called without sessionId - using default window');
   } else if (!windowId) {
-    console.warn(`[Helm] Session ${sessionId} has no window - using default window`);
+    throw new Error(`ERR_NO_WINDOW: Session ${sessionId} has no window. Use browser_navigate first.`);
   }
 
   const createOptions = { url: url || 'about:blank' };
@@ -134,7 +133,7 @@ export async function closeTab(tabId, sessionId) {
   if (!sessionId) {
     console.warn('[Helm] closeTab called without sessionId - isolation bypassed');
   } else if (!windowId) {
-    console.warn(`[Helm] Session ${sessionId} has no window - using current window`);
+    throw new Error(`ERR_NO_WINDOW: Session ${sessionId} has no window. Use browser_navigate first.`);
   }
 
   if (tabId) {
@@ -146,10 +145,8 @@ export async function closeTab(tabId, sessionId) {
     return { success: true, tabId };
   }
 
-  // Close active tab in session's window
-  const query = windowId
-    ? { active: true, windowId }
-    : { active: true, currentWindow: true };
+  // Close active tab in session's window (windowId kesinlikle var, yukarıda guard'landı)
+  const query = windowId ? { active: true, windowId } : { active: true, currentWindow: true };
   const [tab] = await chrome.tabs.query(query);
   if (!tab) throw new Error('No active tab to close');
 

@@ -105,7 +105,7 @@ export async function navigate(url, tabId, sessionId) {
 export async function screenshot(tabId, sessionId, selector = null) {
   const windowId = getWindowIdForSession(sessionId);
   if (sessionId && !windowId) {
-    throw new Error(`Session ${sessionId} has no window assigned. Use browser_navigate first.`);
+    throw new Error(`ERR_NO_WINDOW: Session ${sessionId} has no window assigned. Use browser_navigate first.`);
   }
   const captureWindowId = windowId || null;
 

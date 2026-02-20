@@ -122,7 +122,7 @@ export async function startServer(): Promise<void> {
           } else if (message.type === "register" || message.type === "command" || message.type === "unregister" || message.type === "keepalive") {
             // Client message
             handleClientMessage(message as ClientMessage, ws as unknown as WebSocket);
-          } else if (message.type === "route_result" || message.type === "error" || message.type === "tab_closed") {
+          } else if (message.type === "route_result" || message.type === "error" || message.type === "tab_closed" || message.type === "window_closed") {
             // Extension result/error
             handleExtensionMessage(message as ExtensionMessage, ws as unknown as WebSocket);
           } else {

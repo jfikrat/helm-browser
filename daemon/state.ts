@@ -16,6 +16,12 @@ export const clientSessions = new Map<string, ClientSession>();
 // Window cache: tracks which sessions already have windows created
 export const windowCache = new Set<string>();
 
+// Self-heal lock: prevents parallel heal attempts for the same session
+export const healingInProgress = new Set<string>();
+
+// Waiters for in-progress heals: sessionId → list of resolve callbacks
+export const healWaiters = new Map<string, Array<() => void>>();
+
 // ============================================
 // Extension Connection
 // ============================================
@@ -85,6 +91,10 @@ export function unregisterClient(sessionId: string): void {
   if (session) {
     clientSessions.delete(sessionId);
     windowCache.delete(sessionId);
+    healingInProgress.delete(sessionId);
+    // Pending waiter'ları unblock et (retry COMMAND_FAILED alır, hang olmaz)
+    healWaiters.get(sessionId)?.forEach((resolve) => resolve());
+    healWaiters.delete(sessionId);
 
     // Clean up tab routing for this session
     for (const [tabId, sid] of tabRouting) {
@@ -142,5 +152,9 @@ export function clearAllWindowIds(): void {
   }
   windowCache.clear();
   tabRouting.clear();
+  healingInProgress.clear();
+  // Pending waiter'ları unblock et (retry COMMAND_FAILED alır, hang olmaz)
+  healWaiters.forEach((waiters) => waiters.forEach((resolve) => resolve()));
+  healWaiters.clear();
   console.error("[Daemon] Cleared all windowIds (extension reconnected)");
 }

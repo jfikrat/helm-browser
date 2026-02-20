@@ -15,6 +15,8 @@ import {
   pendingRequests,
   tabRouting,
   windowCache,
+  healingInProgress,
+  healWaiters,
   registerClient,
   unregisterClient,
   updateClientLastSeen,
@@ -128,10 +130,28 @@ async function handleCommand(
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
 
-    // Self-heal: missed window_closed event → windowCache stale → extension "has no window"
-    // Cache'i temizle, yeni window aç, komutu bir kez tekrar dene
-    if (errMsg.includes("has no window") && windowCache.has(sessionId)) {
-      console.error(`[Daemon] Self-heal triggered for session ${sessionId}: ${errMsg}`);
+    // Self-heal: missed window_closed → stale windowCache → extension ERR_NO_WINDOW
+    // ERR_NO_WINDOW sentinel sayesinde string match güvenilir; lock ile race condition önlenir
+    // windowCache heal sırasında düşebilir → healingInProgress ile OR koşulu
+    if (errMsg.includes("ERR_NO_WINDOW") && (windowCache.has(sessionId) || healingInProgress.has(sessionId))) {
+      // Heal zaten devam ediyorsa bitene kadar bekle, sonra komutu retry et
+      if (healingInProgress.has(sessionId)) {
+        await new Promise<void>((resolve) => {
+          const waiters = healWaiters.get(sessionId) ?? [];
+          waiters.push(resolve);
+          healWaiters.set(sessionId, waiters);
+        });
+        try {
+          const retryResult = await sendCommandToExtension(command, params, sessionId);
+          sendResponseToClient(clientWs, reqId, sessionId, retryResult);
+        } catch (retryError) {
+          sendErrorToClient(clientWs, reqId, sessionId, "COMMAND_FAILED", retryError instanceof Error ? retryError.message : String(retryError));
+        }
+        return;
+      }
+
+      healingInProgress.add(sessionId);
+      console.error(`[Daemon] Self-heal triggered for session ${sessionId}`);
       setClientWindowId(sessionId, null);
       try {
         const newWindow = await sendCommandToExtension("create_window", { sessionId }, sessionId);
@@ -145,6 +165,12 @@ async function handleCommand(
         console.error(`[Daemon] Self-heal failed for session ${sessionId}:`, retryError);
         sendErrorToClient(clientWs, reqId, sessionId, "WINDOW_CREATION_FAILED", retryError instanceof Error ? retryError.message : String(retryError));
         return;
+      } finally {
+        healingInProgress.delete(sessionId);
+        // Bekleyen komutları serbest bırak
+        const waiters = healWaiters.get(sessionId) ?? [];
+        healWaiters.delete(sessionId);
+        waiters.forEach((resolve) => resolve());
       }
     }
 
