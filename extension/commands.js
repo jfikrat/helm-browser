@@ -315,9 +315,21 @@ export async function type(selector, text, tabId, sessionId) {
     return { success: false, error: 'Cannot type on restricted page', restricted: true };
   }
 
+  // Encode text to avoid "Value is unserializable" in chrome.scripting.executeScript args.
+  // Special characters (lone surrogates, certain Unicode) can fail structured clone;
+  // encodeURIComponent produces safe ASCII, decoded in the page via decodeURIComponent.
+  let encodedText;
+  try {
+    encodedText = encodeURIComponent(text);
+  } catch (e) {
+    // Lone surrogates in the string cause encodeURIComponent to throw — strip them
+    encodedText = encodeURIComponent(text.replace(/[\uD800-\uDFFF]/g, '\uFFFD'));
+  }
+
   const { ok, result, error, restricted } = await safeExecuteScript(
     tab.id,
-    (sel, txt) => {
+    (sel, enc) => {
+      const txt = decodeURIComponent(enc);
       const element = document.querySelector(sel);
       if (!element) {
         return { success: false, error: 'Element not found' };
@@ -346,9 +358,10 @@ export async function type(selector, text, tabId, sessionId) {
         element.dispatchEvent(new Event('input', { bubbles: true }));
       }
 
-      return { success: true, selector: sel, text: txt };
+      // Don't echo text back — it could itself be unserializable
+      return { success: true, selector: sel };
     },
-    [selector, text]
+    [selector, encodedText]
   );
 
   if (!ok) return { success: false, error, restricted };
@@ -757,9 +770,18 @@ export async function executeScript(code, tabId, sessionId) {
     await chrome.debugger.attach({ tabId: tab.id }, '1.3');
     await chrome.debugger.sendCommand({ tabId: tab.id }, 'Runtime.enable');
 
-    // Execute via debugger (bypasses CSP)
+    // Wrap user code so the result is always JSON-serializable (avoids "Value is unserializable").
+    // The wrapper runs user code inside a function (so `return` works), then coerces
+    // the result to a serializable form: primitives pass through, objects are JSON-cloned,
+    // and non-serializable values (DOM nodes, functions, etc.) fall back to String().
+    const wrappedCode = `(function() {
+  var __r = (function() { ${code} })();
+  if (__r === null || __r === undefined || typeof __r === 'number' || typeof __r === 'string' || typeof __r === 'boolean') return __r;
+  try { return JSON.parse(JSON.stringify(__r)); } catch(e) { return String(__r); }
+})()`;
+
     const result = await chrome.debugger.sendCommand({ tabId: tab.id }, 'Runtime.evaluate', {
-      expression: code,
+      expression: wrappedCode,
       returnByValue: true,
     });
 

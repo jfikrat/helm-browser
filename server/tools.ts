@@ -221,6 +221,18 @@ export const tools: Tool[] = [
       },
     },
   },
+  {
+    name: "browser_execute",
+    description: "Execute JavaScript code in the browser tab (uses Chrome Debugger API, bypasses CSP). Supports return statements and await.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        code: { type: "string", description: "JavaScript code to execute. Use return to get a value back." },
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
+      required: ["code"],
+    },
+  },
 ];
 
 // Tool name to command mapping
@@ -241,6 +253,7 @@ const toolToCommand: Record<string, string> = {
   browser_press_key: "press_key",
   browser_paste: "paste",
   browser_get_cookies: "get_cookies",
+  browser_execute: "execute",
 };
 
 // Handle tool calls
