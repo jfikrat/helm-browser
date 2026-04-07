@@ -19,8 +19,32 @@ export const sessionWindows = new Map();
 // Recording state: tabId -> { frames, startTime, maxDuration, timer }
 export const activeRecordings = new Map();
 
-// Debug observer state: tabId -> { consoleEntries, networkEntries, requestMap, startedAt }
+// Debug observer state: observerKey -> { tabId, consoleEntries, networkEntries, requestMap, startedAt }
 export const activeObservers = new Map();
+
+// Per-tab command mutex: tabId -> Promise chain for serialized debugger-affecting commands
+export const tabMutexes = new Map();
+
+// Run fn exclusively for tabId - queues if another command is already running
+export async function withTabMutex(tabId, fn) {
+  const prev = tabMutexes.get(tabId) ?? Promise.resolve();
+  let release;
+  const current = new Promise((resolve) => {
+    release = resolve;
+  });
+  const tail = prev.then(() => current, () => current);
+  tabMutexes.set(tabId, tail);
+
+  try {
+    await prev.catch(() => {});
+    return await fn();
+  } finally {
+    release?.();
+    if (tabMutexes.get(tabId) === tail) {
+      tabMutexes.delete(tabId);
+    }
+  }
+}
 
 // Persistent debugger session state: tabId -> { attached, refCount, detachTimer, attachPromise }
 export const debuggerSessions = new Map();

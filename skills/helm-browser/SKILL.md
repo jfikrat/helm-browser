@@ -75,19 +75,36 @@ browser_get_element_text("h1.title")
 |------|-------------|
 | `browser_screenshot(selector?)` | Take a screenshot (full page or element) |
 | `browser_get_element_text(selector)` | Get text content of an element |
+| `browser_get_snapshot()` | Snapshot interactive elements with stable refs |
 | `browser_find_text(text, click?)` | Find text on page, optionally click it |
+| `browser_wait_for_function(expression, timeout?, interval?)` | Poll a JS expression until truthy |
 | `browser_get_cookies(url?, name?)` | Get cookies for a URL |
 
 ### Interaction
 | Tool | Description |
 |------|-------------|
 | `browser_click(selector)` | Click using CSS selector |
+| `browser_right_click(selector)` | Right-click an element |
+| `browser_double_click(selector)` | Double-click an element |
 | `browser_click_at(x, y)` | Click at specific coordinates |
 | `browser_type(selector, text)` | Type text into an input |
 | `browser_paste(text, selector?)` | Paste text (for long content) |
 | `browser_hover(selector)` | Hover over an element |
 | `browser_scroll(direction, amount?)` | Scroll page or element |
 | `browser_press_key(key)` | Press a keyboard key |
+| `browser_press_keys(keys)` | Press a key chord |
+| `browser_select(selector, value)` | Select a dropdown option |
+| `browser_set_cookie(...)` | Set a browser cookie |
+| `browser_clear_cookies(...)` | Clear cookies for a URL |
+
+### Targets & Debugging
+| Tool | Description |
+|------|-------------|
+| `browser_list_targets()` | List tabs and their iframes in the current session |
+| `browser_wait_for_popup(timeout?, tabId?)` | Wait for a new tab or popup window |
+| `browser_wait_for_dialog(timeout?, tabId?)` | Wait for alert/confirm/prompt dialogs |
+| `browser_handle_dialog(accept?, promptText?, tabId?)` | Accept or dismiss a dialog |
+| `browser_debug_status()` | Inspect debugger sessions, observers, and recordings |
 
 ### Advanced
 | Tool | Description |

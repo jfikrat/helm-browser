@@ -10,6 +10,7 @@
     "storage",
     "cookies",
     "debugger",
+    "webNavigation",
     "downloads",
     "alarms",
     "sidePanel"

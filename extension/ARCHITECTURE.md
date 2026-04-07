@@ -110,6 +110,18 @@ Server WebSocket Message
    - Prevents cross-session access
 ```
 
+### Persistent Debugger Sessions
+
+- `acquireDebugger()` / `releaseDebugger()` keep per-tab debugger attachments alive across short command bursts
+- A short grace period reduces attach/detach churn when debugger-backed commands run back-to-back
+- Per-tab mutexing serializes debugger-mutating commands so screenshots, observers, recordings, and execution do not race
+
+### Semantic Locators and Multi-Target Support
+
+- `browser_get_snapshot()` stamps stable `data-helm-ref` attributes on interactive elements
+- Locator resolution supports `role`, `name`, `text`, `label`, `placeholder`, `testId`, and `ref`
+- Multi-target tools cover iframe enumeration, popup detection, and dialog wait/handle flows
+
 ## Key Concepts
 
 ### ES Modules (Manifest V3)

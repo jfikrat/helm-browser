@@ -160,6 +160,16 @@ Each Claude session gets its own Chrome window:
 - `sessionWindows` map in extension tracks session → windowId
 - All commands include `sessionId` for window scoping
 
+### Persistent Debugger Sessions
+
+- The extension keeps per-tab debugger sessions alive with a small grace period so bursty commands can reuse the same attach
+- Debugger-mutating commands are serialized per tab to avoid races across screenshots, observers, recordings, and JavaScript execution
+
+### Semantic Locators and Multi-Target Support
+
+- The browser tool surface now includes `browser_get_snapshot()` and locator-based targeting for stable element resolution
+- Multi-target commands cover tabs, iframes, popups, and dialogs via dedicated list/wait/handle tools
+
 ### Auto-Start Chrome
 
 If extension not connected:

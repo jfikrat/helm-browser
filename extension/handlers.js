@@ -29,6 +29,7 @@ import {
   getNetworkRequests,
   getElementText,
   getUrl,
+  listTargets,
   click,
   type,
   uploadFile,
@@ -49,11 +50,16 @@ import {
   waitForFunction,
   paste,
   recordStart,
+  waitForPopup,
+  waitForDialog,
+  handleDialog,
   rightClick,
   doubleClick,
   pressKeys,
   selectOption,
   handleDebuggerEvent,
+  getDebugStatus,
+  getSnapshot,
 } from './commands.js';
 
 // Set up debugger event listener for screencast frames
@@ -316,9 +322,13 @@ async function handleCommand(command, params) {
     case 'get_network_requests':
       return await getNetworkRequests(params.tabId, params.sessionId, params.duration, params.reload);
     case 'get_element_text':
-      return await getElementText(params.selector, params.tabId, params.sessionId, params.index);
+      return await getElementText(params.selector, params.tabId, params.sessionId, params.index, params.locator);
     case 'get_url':
       return await getUrl(params.tabId, params.sessionId);
+    case 'get_snapshot':
+      return await getSnapshot(params.tabId, params.sessionId);
+    case 'list_targets':
+      return await listTargets(params.sessionId);
 
     // Tabs
     case 'get_tabs':
@@ -337,12 +347,13 @@ async function handleCommand(command, params) {
         params.tabId,
         params.sessionId,
         params.verify,
-        params.verifyTimeout
+        params.verifyTimeout,
+        params.locator
       );
     case 'right_click':
-      return await rightClick(params.selector, params.tabId, params.sessionId);
+      return await rightClick(params.selector, params.tabId, params.sessionId, params.locator);
     case 'double_click':
-      return await doubleClick(params.selector, params.tabId, params.sessionId);
+      return await doubleClick(params.selector, params.tabId, params.sessionId, params.locator);
     case 'type':
       return await type(
         params.selector,
@@ -350,7 +361,8 @@ async function handleCommand(command, params) {
         params.tabId,
         params.sessionId,
         params.verify,
-        params.verifyTimeout
+        params.verifyTimeout,
+        params.locator
       );
     case 'upload_file':
       return await uploadFile(
@@ -362,7 +374,7 @@ async function handleCommand(command, params) {
         params.verifyTimeout
       );
     case 'hover':
-      return await hover(params.selector, params.tabId, params.sessionId);
+      return await hover(params.selector, params.tabId, params.sessionId, params.locator);
     case 'scroll':
       return await scroll(
         params.direction,
@@ -376,7 +388,8 @@ async function handleCommand(command, params) {
         params.selector,
         params.timeout,
         params.tabId,
-        params.sessionId
+        params.sessionId,
+        params.locator
       );
     case 'wait_for_url':
       return await waitForUrl(
@@ -393,6 +406,12 @@ async function handleCommand(command, params) {
         params.tabId,
         params.sessionId
       );
+    case 'wait_for_popup':
+      return await waitForPopup(params.timeout, params.tabId, params.sessionId);
+    case 'wait_for_dialog':
+      return await waitForDialog(params.timeout, params.tabId, params.sessionId);
+    case 'handle_dialog':
+      return await handleDialog(params.accept, params.promptText, params.tabId, params.sessionId);
 
     // Coordinates
     case 'click_at':
@@ -414,12 +433,13 @@ async function handleCommand(command, params) {
         params.tabId,
         params.sessionId,
         params.verify,
-        params.verifyTimeout
+        params.verifyTimeout,
+        params.locator
       );
     case 'press_keys':
       return await pressKeys(params.keys, params.selector, params.tabId, params.sessionId);
     case 'select':
-      return await selectOption(params.selector, params.value, params.tabId, params.sessionId);
+      return await selectOption(params.selector, params.value, params.tabId, params.sessionId, params.locator);
     case 'drag_and_drop':
       return await dragAndDrop(params.sourceSelector, params.targetSelector, params.tabId, params.sessionId);
     case 'wait_for_download':
@@ -475,6 +495,8 @@ async function handleCommand(command, params) {
       return await clearCookies(params);
 
     // Misc
+    case 'debug_status':
+      return await getDebugStatus();
     case 'ping':
       return { status: 'pong' };
 

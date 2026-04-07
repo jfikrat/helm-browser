@@ -82,10 +82,10 @@ export const tools: Tool[] = [
       type: "object",
       properties: {
         selector: { type: "string", description: "CSS selector for the element" },
+        locator: { type: "object", description: "Semantic locator (alternative to selector). Properties: role, name, text, label, placeholder, testId, ref" },
         index: { type: "number", description: "Element index: null=first, -1=last, 0+=specific index" },
         tabId: { type: "number", description: "Optional: specific tab" },
       },
-      required: ["selector"],
     },
   },
   {
@@ -197,11 +197,11 @@ export const tools: Tool[] = [
       type: "object",
       properties: {
         selector: { type: "string", description: "CSS selector for the element" },
+        locator: { type: "object", description: "Semantic locator (alternative to selector). Properties: role, name, text, label, placeholder, testId, ref" },
         verify: { type: "boolean", description: "Optional: verify that the click changed page state" },
         verifyTimeout: { type: "number", description: "Optional: verification wait in milliseconds" },
         tabId: { type: "number", description: "Optional: specific tab" },
       },
-      required: ["selector"],
     },
   },
   {
@@ -211,9 +211,9 @@ export const tools: Tool[] = [
       type: "object",
       properties: {
         selector: { type: "string", description: "CSS selector for the element" },
+        locator: { type: "object", description: "Semantic locator (alternative to selector). Properties: role, name, text, label, placeholder, testId, ref" },
         tabId: { type: "number", description: "Optional: specific tab" },
       },
-      required: ["selector"],
     },
   },
   {
@@ -223,9 +223,9 @@ export const tools: Tool[] = [
       type: "object",
       properties: {
         selector: { type: "string", description: "CSS selector for the element" },
+        locator: { type: "object", description: "Semantic locator (alternative to selector). Properties: role, name, text, label, placeholder, testId, ref" },
         tabId: { type: "number", description: "Optional: specific tab" },
       },
-      required: ["selector"],
     },
   },
   {
@@ -235,12 +235,13 @@ export const tools: Tool[] = [
       type: "object",
       properties: {
         selector: { type: "string", description: "CSS selector for the input" },
+        locator: { type: "object", description: "Semantic locator (alternative to selector). Properties: role, name, text, label, placeholder, testId, ref" },
         text: { type: "string", description: "Text to type" },
         verify: { type: "boolean", description: "Optional: verify that the typed text appears in the target element" },
         verifyTimeout: { type: "number", description: "Optional: verification wait in milliseconds" },
         tabId: { type: "number", description: "Optional: specific tab" },
       },
-      required: ["selector", "text"],
+      required: ["text"],
     },
   },
   {
@@ -250,9 +251,9 @@ export const tools: Tool[] = [
       type: "object",
       properties: {
         selector: { type: "string", description: "CSS selector for the element" },
+        locator: { type: "object", description: "Semantic locator (alternative to selector). Properties: role, name, text, label, placeholder, testId, ref" },
         tabId: { type: "number", description: "Optional: specific tab" },
       },
-      required: ["selector"],
     },
   },
   {
@@ -305,6 +306,7 @@ export const tools: Tool[] = [
       properties: {
         key: { type: "string", description: "Key to press: Enter, Tab, Escape, Backspace, ArrowUp, ArrowDown, ArrowLeft, ArrowRight" },
         selector: { type: "string", description: "Optional: CSS selector to focus before pressing key" },
+        locator: { type: "object", description: "Semantic locator (alternative to selector). Properties: role, name, text, label, placeholder, testId, ref" },
         verify: { type: "boolean", description: "Optional: verify that the key press changed page state" },
         verifyTimeout: { type: "number", description: "Optional: verification wait in milliseconds" },
         tabId: { type: "number", description: "Optional: specific tab" },
@@ -336,10 +338,65 @@ export const tools: Tool[] = [
       type: "object",
       properties: {
         selector: { type: "string", description: "CSS selector for the select element" },
+        locator: { type: "object", description: "Semantic locator (alternative to selector). Properties: role, name, text, label, placeholder, testId, ref" },
         value: { type: "string", description: "Option value attribute or visible text" },
         tabId: { type: "number", description: "Optional: specific tab" },
       },
-      required: ["selector", "value"],
+      required: ["value"],
+    },
+  },
+  {
+    name: "browser_get_snapshot",
+    description: "Get all interactive elements on the page with stable refs. Use refs with the locator parameter to target elements reliably across DOM changes.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
+    },
+  },
+  {
+    name: "browser_list_targets",
+    description: "List all tabs, windows, and iframes in the current session",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string", description: "Optional: specific session to inspect" },
+      },
+    },
+  },
+  {
+    name: "browser_wait_for_popup",
+    description: "Wait for a new tab or popup window to open",
+    inputSchema: {
+      type: "object",
+      properties: {
+        timeout: { type: "number", description: "Timeout in milliseconds (default 10000)" },
+        tabId: { type: "number", description: "Optional: specific tab to watch for popup-related opens" },
+      },
+    },
+  },
+  {
+    name: "browser_wait_for_dialog",
+    description: "Wait for a JavaScript dialog (alert/confirm/prompt) to appear",
+    inputSchema: {
+      type: "object",
+      properties: {
+        timeout: { type: "number", description: "Timeout in milliseconds (default 10000)" },
+        tabId: { type: "number", description: "Optional: specific tab to watch" },
+      },
+    },
+  },
+  {
+    name: "browser_handle_dialog",
+    description: "Accept or dismiss a JavaScript dialog (alert/confirm/prompt)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        accept: { type: "boolean", description: "Accept the dialog (default true)" },
+        promptText: { type: "string", description: "Text to submit for prompt dialogs" },
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
     },
   },
   {
@@ -412,10 +469,10 @@ export const tools: Tool[] = [
       type: "object",
       properties: {
         selector: { type: "string", description: "CSS selector to wait for" },
+        locator: { type: "object", description: "Semantic locator (alternative to selector). Properties: role, name, text, label, placeholder, testId, ref" },
         timeout: { type: "number", description: "Timeout in milliseconds (default 10000)" },
         tabId: { type: "number", description: "Optional: specific tab" },
       },
-      required: ["selector"],
     },
   },
   {
@@ -478,6 +535,11 @@ export const tools: Tool[] = [
   {
     name: "browser_status",
     description: "Check browser extension connection status",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "browser_debug_status",
+    description: "Get internal debugger session state, active observers, and recordings for debugging",
     inputSchema: { type: "object", properties: {} },
   },
   {
@@ -603,6 +665,10 @@ const toolToCommand: Record<string, string> = {
   browser_press_keys: "press_keys",
   browser_select: "select",
   browser_wait_for_function: "wait_for_function",
+  browser_list_targets: "list_targets",
+  browser_wait_for_popup: "wait_for_popup",
+  browser_wait_for_dialog: "wait_for_dialog",
+  browser_handle_dialog: "handle_dialog",
   browser_drag_and_drop: "drag_and_drop",
   browser_upload_file: "upload_file",
   browser_wait_for_download: "wait_for_download",
@@ -612,6 +678,8 @@ const toolToCommand: Record<string, string> = {
   browser_wait_for_text: "wait_for_text",
   browser_wait_for_request: "wait_for_request",
   browser_wait_for_network_idle: "wait_for_network_idle",
+  browser_debug_status: "debug_status",
+  browser_get_snapshot: "get_snapshot",
   browser_paste: "paste",
   browser_record: "record_start",
   browser_get_cookies: "get_cookies",
@@ -675,10 +743,33 @@ export async function handleToolCall(
         }
       }
 
-      // Ensure session has a window (lazy initialization)
-      if (mySessionId) {
-        await ensureSessionWindow(mySessionId);
-      }
+    }
+
+    if (name === "browser_debug_status") {
+      const result = await sendCommand(mySessionId || "", "debug_status", {});
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+
+    if (name === "browser_list_targets") {
+      const sessionId = (typedArgs.sessionId as string | undefined) || mySessionId || "";
+      const result = await sendCommand(sessionId, "list_targets", {
+        sessionId,
+      });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+
+    if (name === "browser_wait_for_popup" || name === "browser_wait_for_dialog" || name === "browser_handle_dialog") {
+      const command = toolToCommand[name];
+      const result = await sendCommand(mySessionId || "", command, {
+        ...typedArgs,
+        sessionId: mySessionId || "",
+      });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+
+    // Ensure session has a window (lazy initialization)
+    if (mySessionId) {
+      await ensureSessionWindow(mySessionId);
     }
 
     // Screenshot handler
