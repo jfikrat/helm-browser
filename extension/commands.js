@@ -428,6 +428,32 @@ async function ensureDebuggerAttached(tabId, session) {
       }
 
       session.attached = true;
+
+      // Re-apply device emulation if it was active before detach
+      const emulation = activeEmulations.get(tabId);
+      if (emulation) {
+        try {
+          await chrome.debugger.sendCommand({ tabId }, 'Emulation.setDeviceMetricsOverride', {
+            width: emulation.width,
+            height: emulation.height,
+            deviceScaleFactor: emulation.deviceScaleFactor,
+            mobile: emulation.mobile,
+            screenWidth: emulation.width,
+            screenHeight: emulation.height,
+          });
+          if (typeof emulation.userAgent === 'string') {
+            await chrome.debugger.sendCommand({ tabId }, 'Emulation.setUserAgentOverride', {
+              userAgent: emulation.userAgent,
+            });
+          }
+          await chrome.debugger.sendCommand({ tabId }, 'Emulation.setTouchEmulationEnabled', {
+            enabled: !!emulation.touch,
+            maxTouchPoints: emulation.touch ? 5 : 0,
+          });
+        } catch {
+          // Non-fatal: emulation re-apply failed (tab may be navigating)
+        }
+      }
     })();
 
     session.attachPromise = attachPromise;
