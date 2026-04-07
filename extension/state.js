@@ -49,6 +49,11 @@ export async function withTabMutex(tabId, fn) {
 // Persistent debugger session state: tabId -> { attached, refCount, detachTimer, attachPromise }
 export const debuggerSessions = new Map();
 
+// Pending dialogs: tabId -> { type, message, defaultPrompt }
+// Set by global handleDebuggerEvent when Page.javascriptDialogOpening fires.
+// Lets waitForDialog detect dialogs that opened before it started listening.
+export const pendingDialogs = new Map();
+
 export function cleanupDebuggerSession(tabId) {
   const session = debuggerSessions.get(tabId);
   if (!session) {
@@ -64,6 +69,9 @@ export function cleanupDebuggerSession(tabId) {
   session.refCount = 0;
   session.attachPromise = null;
   debuggerSessions.delete(tabId);
+
+  // Clear any pending dialog state for this tab (avoids stale entries after detach/close)
+  pendingDialogs.delete(tabId);
 }
 
 // Persist sessionWindows to chrome.storage.local

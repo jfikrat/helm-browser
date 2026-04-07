@@ -7,6 +7,7 @@ import {
   activeRecordings,
   cleanupDebuggerSession,
   debuggerSessions,
+  pendingDialogs,
   withTabMutex,
 } from './state.js';
 
@@ -1351,9 +1352,21 @@ export async function waitForDialog(timeout = 10000, tabId, sessionId) {
   const tab = await getTargetTab(tabId, sessionId);
   const clampedTimeout = Math.min(Math.max(timeout, 500), 30000);
 
+  // If a dialog already fired before this call (race condition), return immediately
+  if (pendingDialogs.has(tab.id)) {
+    const pending = pendingDialogs.get(tab.id);
+    return { success: true, ...pending, tabId: tab.id };
+  }
+
   const dbg = await acquireDebugger(tab.id);
   try {
     await dbg.send('Page.enable');
+
+    // Check again after Page.enable in case it arrived between the check above and attach
+    if (pendingDialogs.has(tab.id)) {
+      const pending = pendingDialogs.get(tab.id);
+      return { success: true, ...pending, tabId: tab.id };
+    }
 
     return await new Promise((resolve) => {
       let settled = false;
@@ -1383,6 +1396,13 @@ export async function waitForDialog(timeout = 10000, tabId, sessionId) {
       }
 
       chrome.debugger.onEvent.addListener(listener);
+
+      // Final check: dialog may have arrived between Page.enable and addListener
+      if (pendingDialogs.has(tab.id)) {
+        cleanup();
+        const pending = pendingDialogs.get(tab.id);
+        resolve({ success: true, ...pending, tabId: tab.id });
+      }
     });
   } finally {
     releaseDebugger(tab.id);
@@ -1393,10 +1413,13 @@ export async function handleDialog(accept = true, promptText = '', tabId, sessio
   const tab = await getTargetTab(tabId, sessionId);
   const dbg = await acquireDebugger(tab.id);
   try {
+    // Page.enable required so Chrome tracks dialog state after a debugger re-attach
+    await dbg.send('Page.enable');
     await dbg.send('Page.handleJavaScriptDialog', {
       accept,
       promptText: promptText || '',
     });
+    pendingDialogs.delete(tab.id);
     return { success: true, accept, promptText };
   } finally {
     releaseDebugger(tab.id);
@@ -1625,7 +1648,9 @@ export async function type(selector, text, tabId, sessionId, verify = false, ver
 
       return { success: true };
     },
-    [selector]
+    [selector],
+    null,   // frameId
+    'MAIN'  // world — clear events must reach framework listeners (React, Vue, etc.)
   );
 
   if (!clearResult.ok) return { success: false, error: clearResult.error, restricted: clearResult.restricted };
@@ -2985,7 +3010,9 @@ export async function paste(text, selector = null, tabId, sessionId) {
         return { success: false, error: e.message };
       }
     },
-    [text, selector]
+    [text, selector],
+    null,   // frameId
+    'MAIN'  // world — paste events must reach framework listeners
   );
 
   if (!ok) return { success: false, error, restricted };
@@ -3427,6 +3454,17 @@ export function handleDebuggerEvent(source, method, params) {
         observer.consoleEntries = observer.consoleEntries.slice(-200);
       }
     }
+  }
+
+  // Track pending dialogs globally so waitForDialog can detect already-open ones
+  if (method === 'Page.javascriptDialogOpening' && tabId !== undefined) {
+    pendingDialogs.set(tabId, {
+      type: params.type,
+      message: params.message,
+      defaultPrompt: params.defaultPrompt ?? '',
+    });
+  } else if (method === 'Page.javascriptDialogClosed' && tabId !== undefined) {
+    pendingDialogs.delete(tabId);
   }
 
   if (method !== 'Page.screencastFrame') {
