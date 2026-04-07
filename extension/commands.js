@@ -158,6 +158,7 @@ export async function emulateDevice(device, tabId, sessionId) {
   }
 
   const config = resolved.config;
+  const alreadyHolding = activeEmulations.has(tab.id);
   const dbg = await acquireDebugger(tab.id);
 
   try {
@@ -183,19 +184,27 @@ export async function emulateDevice(device, tabId, sessionId) {
 
     activeEmulations.set(tab.id, config);
 
+    // If already holding a ref from a previous emulateDevice call, release
+    // the extra ref acquired this time — the existing held ref keeps it alive.
+    // Otherwise, intentionally keep this ref to prevent the 5s grace-period
+    // detach from clearing the emulation. resetViewport will release it.
+    if (alreadyHolding) {
+      releaseDebugger(tab.id);
+    }
+
     return { success: true, device: config };
   } catch (error) {
+    releaseDebugger(tab.id);
     return {
       success: false,
       error: error?.message || String(error),
     };
-  } finally {
-    releaseDebugger(tab.id);
   }
 }
 
 export async function resetViewport(tabId, sessionId) {
   const tab = await getTargetTab(tabId, sessionId);
+  const wasHolding = activeEmulations.has(tab.id);
   const dbg = await acquireDebugger(tab.id);
 
   try {
@@ -213,7 +222,10 @@ export async function resetViewport(tabId, sessionId) {
     };
   } finally {
     activeEmulations.delete(tab.id);
-    releaseDebugger(tab.id);
+    releaseDebugger(tab.id); // release this call's ref
+    if (wasHolding) {
+      releaseDebugger(tab.id); // release the permanently-held ref from emulateDevice
+    }
   }
 }
 
