@@ -49,6 +49,9 @@ export async function withTabMutex(tabId, fn) {
 // Persistent debugger session state: tabId -> { attached, refCount, detachTimer, attachPromise }
 export const debuggerSessions = new Map();
 
+// Active viewport/device emulation state: tabId -> device config
+export const activeEmulations = new Map();
+
 // Pending dialogs: tabId -> { type, message, defaultPrompt }
 // Set by global handleDebuggerEvent when Page.javascriptDialogOpening fires.
 // Lets waitForDialog detect dialogs that opened before it started listening.
@@ -69,6 +72,7 @@ export function cleanupDebuggerSession(tabId) {
   session.refCount = 0;
   session.attachPromise = null;
   debuggerSessions.delete(tabId);
+  activeEmulations.delete(tabId);
 
   // Clear any pending dialog state for this tab (avoids stale entries after detach/close)
   pendingDialogs.delete(tabId);

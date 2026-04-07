@@ -7,6 +7,7 @@ import {
   tabRouting,
   setTabRouting,
   setProtocolVersion,
+  activeEmulations,
   cleanupDebuggerSession,
 } from './state.js';
 import { sendMessage } from './websocket.js';
@@ -53,10 +54,12 @@ import {
   waitForPopup,
   waitForDialog,
   handleDialog,
+  emulateDevice,
   rightClick,
   doubleClick,
   pressKeys,
   selectOption,
+  resetViewport,
   handleDebuggerEvent,
   getDebugStatus,
   getSnapshot,
@@ -71,12 +74,14 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 chrome.debugger.onDetach.addListener((source, reason) => {
   console.warn(`[Helm] Debugger detached from tab ${source.tabId}, reason: ${reason}`);
   if (source?.tabId !== undefined) {
+    activeEmulations.delete(source.tabId);
     cleanupDebuggerSession(source.tabId);
   }
 });
 
 // Clean up persistent debugger state when a tab closes
 chrome.tabs.onRemoved.addListener((tabId) => {
+  activeEmulations.delete(tabId);
   cleanupDebuggerSession(tabId);
 });
 
@@ -412,6 +417,10 @@ async function handleCommand(command, params) {
       return await waitForDialog(params.timeout, params.tabId, params.sessionId);
     case 'handle_dialog':
       return await handleDialog(params.accept, params.promptText, params.tabId, params.sessionId);
+    case 'emulate_device':
+      return await emulateDevice(params.device, params.tabId, params.sessionId);
+    case 'reset_viewport':
+      return await resetViewport(params.tabId, params.sessionId);
 
     // Coordinates
     case 'click_at':

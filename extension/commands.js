@@ -4,6 +4,7 @@ import { getTargetTab } from './tabs.js';
 import { getWindowIdForSession, WINDOW_WIDTH, WINDOW_HEIGHT, BROWSER_ZOOM } from './windows.js';
 import {
   activeObservers,
+  activeEmulations,
   activeRecordings,
   cleanupDebuggerSession,
   debuggerSessions,
@@ -29,6 +30,191 @@ function isRestrictedUrl(url) {
   if (RESTRICTED_PATTERNS.some(p => p.test(url))) return true;
   if (ERROR_INDICATORS.some(e => url.includes(e))) return true;
   return false;
+}
+
+const DEVICE_PRESETS = {
+  "iPhone 15": {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 3,
+    mobile: true,
+    touch: true,
+    userAgent:
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+  },
+  "iPhone 15 Pro Max": {
+    width: 430,
+    height: 932,
+    deviceScaleFactor: 3,
+    mobile: true,
+    touch: true,
+    userAgent:
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+  },
+  "iPhone 14": {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 3,
+    mobile: true,
+    touch: true,
+    userAgent:
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+  },
+  "Pixel 8": {
+    width: 412,
+    height: 915,
+    deviceScaleFactor: 2.625,
+    mobile: true,
+    touch: true,
+    userAgent:
+      "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Mobile Safari/537.36",
+  },
+  "Pixel 8 Pro": {
+    width: 412,
+    height: 892,
+    deviceScaleFactor: 3.5,
+    mobile: true,
+    touch: true,
+    userAgent:
+      "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Mobile Safari/537.36",
+  },
+  "iPad Pro": {
+    width: 1024,
+    height: 1366,
+    deviceScaleFactor: 2,
+    mobile: true,
+    touch: true,
+    userAgent:
+      "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+  },
+  "Galaxy S24": {
+    width: 360,
+    height: 780,
+    deviceScaleFactor: 3,
+    mobile: true,
+    touch: true,
+    userAgent:
+      "Mozilla/5.0 (Linux; Android 14; SM-S921B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Mobile Safari/537.36",
+  },
+};
+
+function getAvailableDevicePresets() {
+  return Object.keys(DEVICE_PRESETS);
+}
+
+function resolveDeviceConfig(device) {
+  if (typeof device === 'string') {
+    const presetName = Object.keys(DEVICE_PRESETS).find(
+      (name) => name.toLowerCase() === device.trim().toLowerCase()
+    );
+
+    if (!presetName) {
+      return {
+        ok: false,
+        error: `Unknown device preset: ${device}. Available presets: ${getAvailableDevicePresets().join(', ')}`,
+      };
+    }
+
+    return { ok: true, config: { ...DEVICE_PRESETS[presetName], presetName } };
+  }
+
+  if (!device || typeof device !== 'object') {
+    return { ok: false, error: 'device must be a preset name or a custom config object' };
+  }
+
+  const { width, height, deviceScaleFactor, mobile, userAgent, touch } = device;
+  if (
+    typeof width !== 'number' ||
+    typeof height !== 'number' ||
+    typeof deviceScaleFactor !== 'number' ||
+    typeof mobile !== 'boolean'
+  ) {
+    return {
+      ok: false,
+      error:
+        'Custom device config must include numeric width, height, deviceScaleFactor, and boolean mobile',
+    };
+  }
+
+  return {
+    ok: true,
+    config: {
+      width,
+      height,
+      deviceScaleFactor,
+      mobile,
+      ...(typeof userAgent === 'string' && userAgent ? { userAgent } : {}),
+      touch: typeof touch === 'boolean' ? touch : mobile,
+    },
+  };
+}
+
+export async function emulateDevice(device, tabId, sessionId) {
+  const tab = await getTargetTab(tabId, sessionId);
+  const resolved = resolveDeviceConfig(device);
+
+  if (!resolved.ok) {
+    return { success: false, error: resolved.error };
+  }
+
+  const config = resolved.config;
+  const dbg = await acquireDebugger(tab.id);
+
+  try {
+    await dbg.send('Emulation.setDeviceMetricsOverride', {
+      width: config.width,
+      height: config.height,
+      deviceScaleFactor: config.deviceScaleFactor,
+      mobile: config.mobile,
+      screenWidth: config.width,
+      screenHeight: config.height,
+    });
+
+    if (typeof config.userAgent === 'string') {
+      await dbg.send('Emulation.setUserAgentOverride', {
+        userAgent: config.userAgent,
+      });
+    }
+
+    await dbg.send('Emulation.setTouchEmulationEnabled', {
+      enabled: !!config.touch,
+      maxTouchPoints: config.touch ? 5 : 0,
+    });
+
+    activeEmulations.set(tab.id, config);
+
+    return { success: true, device: config };
+  } catch (error) {
+    return {
+      success: false,
+      error: error?.message || String(error),
+    };
+  } finally {
+    releaseDebugger(tab.id);
+  }
+}
+
+export async function resetViewport(tabId, sessionId) {
+  const tab = await getTargetTab(tabId, sessionId);
+  const dbg = await acquireDebugger(tab.id);
+
+  try {
+    await dbg.send('Emulation.clearDeviceMetricsOverride');
+    await dbg.send('Emulation.setUserAgentOverride', { userAgent: '' });
+    await dbg.send('Emulation.setTouchEmulationEnabled', {
+      enabled: false,
+      maxTouchPoints: 0,
+    });
+    return { success: true };
+  } catch (error) {
+    return {
+      success: false,
+      error: error?.message || String(error),
+    };
+  } finally {
+    activeEmulations.delete(tab.id);
+    releaseDebugger(tab.id);
+  }
 }
 
 // Safe executeScript wrapper - catches error page exceptions and edge cases

@@ -70,6 +70,46 @@ export const tools: Tool[] = [
     },
   },
   {
+    name: "browser_emulate_device",
+    description: 'Set mobile viewport and device emulation. Accepts a preset name (e.g. "iPhone 15", "Pixel 8", "iPad Pro") or a custom config object.',
+    inputSchema: {
+      type: "object",
+      properties: {
+        device: {
+          description: 'Device preset name ("iPhone 15", "iPhone 15 Pro Max", "Pixel 8", "iPad Pro", "Galaxy S24") or custom object { width, height, deviceScaleFactor, mobile, userAgent, touch }',
+          oneOf: [
+            { type: "string" },
+            {
+              type: "object",
+              properties: {
+                width: { type: "number" },
+                height: { type: "number" },
+                deviceScaleFactor: { type: "number" },
+                mobile: { type: "boolean" },
+                userAgent: { type: "string" },
+                touch: { type: "boolean" },
+              },
+            },
+          ],
+        },
+        tabId: { type: "number", description: "Optional: specific tab" },
+        sessionId: { type: "string", description: "Optional: specific session" },
+      },
+      required: ["device"],
+    },
+  },
+  {
+    name: "browser_reset_viewport",
+    description: "Clear all device emulation and restore the real browser viewport.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "number", description: "Optional: specific tab" },
+        sessionId: { type: "string", description: "Optional: specific session" },
+      },
+    },
+  },
+  {
     name: "browser_get_element_text",
     description: "Get text content of a specific element (bypasses CSP, much smaller than full page)",
     inputSchema: {
@@ -636,6 +676,8 @@ const toolToCommand: Record<string, string> = {
   browser_back: "back",
   browser_forward: "forward",
   browser_reload: "reload",
+  browser_emulate_device: "emulate_device",
+  browser_reset_viewport: "reset_viewport",
   browser_get_content: "get_content",
   browser_get_interactables: "get_interactables",
   browser_get_semantic_snapshot: "get_semantic_snapshot",
