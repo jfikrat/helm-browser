@@ -2,7 +2,12 @@
 
 import { getTargetTab } from './tabs.js';
 import { getWindowIdForSession, WINDOW_WIDTH, WINDOW_HEIGHT, BROWSER_ZOOM } from './windows.js';
-import { activeRecordings } from './state.js';
+import {
+  activeObservers,
+  activeRecordings,
+  cleanupDebuggerSession,
+  debuggerSessions,
+} from './state.js';
 
 // Restricted URL patterns - cannot execute scripts on these pages
 const RESTRICTED_PATTERNS = [
@@ -15,6 +20,7 @@ const RESTRICTED_PATTERNS = [
   /^view-source:/i,
 ];
 const ERROR_INDICATORS = ['ERR_', 'chrome-error://'];
+const DEBUGGER_GRACE_PERIOD_MS = 5000;
 
 function isRestrictedUrl(url) {
   if (!url) return true;
@@ -64,6 +70,438 @@ async function safeExecuteScript(tabId, func, args = []) {
   }
 }
 
+function getDebuggerSession(tabId) {
+  let session = debuggerSessions.get(tabId);
+  if (!session) {
+    session = {
+      attached: false,
+      refCount: 0,
+      detachTimer: null,
+      attachPromise: null,
+    };
+    debuggerSessions.set(tabId, session);
+  }
+
+  return session;
+}
+
+async function ensureDebuggerAttached(tabId, session) {
+  if (session.attached) {
+    return;
+  }
+
+  if (!session.attachPromise) {
+    const attachPromise = (async () => {
+      await chrome.debugger.attach({ tabId }, '1.3');
+
+      if (debuggerSessions.get(tabId) !== session) {
+        try {
+          await chrome.debugger.detach({ tabId });
+        } catch {
+          // The tab may already be gone or detached by another actor.
+        }
+        throw new Error(`Debugger session for tab ${tabId} was cleaned up during attach`);
+      }
+
+      session.attached = true;
+    })();
+
+    session.attachPromise = attachPromise;
+    attachPromise.then(() => {
+      if (debuggerSessions.get(tabId) === session && session.attachPromise === attachPromise) {
+        session.attachPromise = null;
+      }
+    }, () => {
+      if (debuggerSessions.get(tabId) === session && session.attachPromise === attachPromise) {
+        session.attachPromise = null;
+      }
+    });
+  }
+
+  await session.attachPromise;
+}
+
+export async function acquireDebugger(tabId) {
+  const session = getDebuggerSession(tabId);
+
+  if (session.detachTimer) {
+    clearTimeout(session.detachTimer);
+    session.detachTimer = null;
+  }
+
+  session.refCount += 1;
+
+  try {
+    await ensureDebuggerAttached(tabId, session);
+  } catch (error) {
+    session.refCount = Math.max(0, session.refCount - 1);
+    if (session.refCount === 0 && debuggerSessions.get(tabId) === session) {
+      cleanupDebuggerSession(tabId);
+    }
+    throw error;
+  }
+
+  return {
+    send: (method, params = {}) =>
+      chrome.debugger.sendCommand({ tabId }, method, params),
+  };
+}
+
+export function releaseDebugger(tabId) {
+  const session = debuggerSessions.get(tabId);
+  if (!session) {
+    return;
+  }
+
+  session.refCount = Math.max(0, session.refCount - 1);
+
+  if (session.refCount > 0) {
+    return;
+  }
+
+  if (session.detachTimer) {
+    return;
+  }
+
+  if (!session.attached && !session.attachPromise) {
+    cleanupDebuggerSession(tabId);
+    return;
+  }
+
+  session.detachTimer = setTimeout(() => {
+    void (async () => {
+      const currentSession = debuggerSessions.get(tabId);
+      if (currentSession !== session) {
+        return;
+      }
+
+      session.detachTimer = null;
+
+      if (session.refCount > 0) {
+        return;
+      }
+
+      try {
+        if (session.attachPromise) {
+          await session.attachPromise;
+        }
+
+        if (debuggerSessions.get(tabId) !== session || session.refCount > 0) {
+          return;
+        }
+
+        if (session.attached) {
+          try {
+            await chrome.debugger.detach({ tabId });
+          } catch {
+            // Ignore detach races with external debugger owners or closed tabs.
+          }
+        }
+      } finally {
+        if (debuggerSessions.get(tabId) === session && session.refCount === 0) {
+          cleanupDebuggerSession(tabId);
+        }
+      }
+    })().catch((error) => {
+      console.warn(`[Helm] Delayed debugger detach failed for tab ${tabId}: ${error.message}`);
+    });
+  }, DEBUGGER_GRACE_PERIOD_MS);
+}
+
+async function captureScreenshotWithDebugger(tabId) {
+  const dbg = await acquireDebugger(tabId);
+  try {
+    await dbg.send('Page.enable');
+
+    const result = await dbg.send('Page.captureScreenshot', {
+      format: 'jpeg',
+      quality: 90,
+      captureBeyondViewport: false,
+    });
+
+    if (!result?.data) {
+      throw new Error('Debugger screenshot returned no data');
+    }
+
+    return `data:image/jpeg;base64,${result.data}`;
+  } finally {
+    releaseDebugger(tabId);
+  }
+}
+
+async function dispatchNativeClick(tabId, x, y) {
+  await dispatchMouseSequence(tabId, x, y, { button: 'left', clickCount: 1, repeatCount: 1 });
+}
+
+async function dispatchMouseSequence(tabId, x, y, { button, clickCount, repeatCount }) {
+  const dbg = await acquireDebugger(tabId);
+  try {
+    await dbg.send('Input.dispatchMouseEvent', {
+      type: 'mouseMoved',
+      x,
+      y,
+      button: 'none',
+    });
+
+    const buttons = button === 'right' ? 2 : 1;
+    for (let i = 0; i < repeatCount; i += 1) {
+      await dbg.send('Input.dispatchMouseEvent', {
+        type: 'mousePressed',
+        x,
+        y,
+        button,
+        buttons,
+        clickCount,
+      });
+      await dbg.send('Input.dispatchMouseEvent', {
+        type: 'mouseReleased',
+        x,
+        y,
+        button,
+        buttons: 0,
+        clickCount,
+      });
+    }
+  } finally {
+    releaseDebugger(tabId);
+  }
+}
+
+async function dispatchNativeKey(tabId, keyName) {
+  const keyMap = {
+    Enter: { key: 'Enter', code: 'Enter', keyCode: 13, text: '\r' },
+    Tab: { key: 'Tab', code: 'Tab', keyCode: 9 },
+    Escape: { key: 'Escape', code: 'Escape', keyCode: 27 },
+    Backspace: { key: 'Backspace', code: 'Backspace', keyCode: 8 },
+    ArrowUp: { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38 },
+    ArrowDown: { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 },
+    ArrowLeft: { key: 'ArrowLeft', code: 'ArrowLeft', keyCode: 37 },
+    ArrowRight: { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 },
+  };
+
+  const keyInfo = keyMap[keyName] || {
+    key: keyName,
+    code: keyName.length === 1 ? `Key${keyName.toUpperCase()}` : keyName,
+    keyCode: keyName.length === 1 ? keyName.toUpperCase().charCodeAt(0) : 0,
+    text: keyName.length === 1 ? keyName : undefined,
+  };
+
+  const dbg = await acquireDebugger(tabId);
+  try {
+    await dbg.send('Input.dispatchKeyEvent', {
+      type: keyInfo.text ? 'keyDown' : 'rawKeyDown',
+      key: keyInfo.key,
+      code: keyInfo.code,
+      windowsVirtualKeyCode: keyInfo.keyCode,
+      nativeVirtualKeyCode: keyInfo.keyCode,
+      text: keyInfo.text,
+      unmodifiedText: keyInfo.text,
+    });
+
+    if (keyInfo.text) {
+      await dbg.send('Input.dispatchKeyEvent', {
+        type: 'char',
+        key: keyInfo.key,
+        code: keyInfo.code,
+        text: keyInfo.text,
+        unmodifiedText: keyInfo.text,
+        windowsVirtualKeyCode: keyInfo.keyCode,
+        nativeVirtualKeyCode: keyInfo.keyCode,
+      });
+    }
+
+    await dbg.send('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: keyInfo.key,
+      code: keyInfo.code,
+      windowsVirtualKeyCode: keyInfo.keyCode,
+      nativeVirtualKeyCode: keyInfo.keyCode,
+    });
+  } finally {
+    releaseDebugger(tabId);
+  }
+}
+
+async function insertNativeText(tabId, text) {
+  const dbg = await acquireDebugger(tabId);
+  try {
+    await dbg.send('Input.insertText', { text });
+  } finally {
+    releaseDebugger(tabId);
+  }
+}
+
+function getFileNameFromPath(filePath) {
+  return String(filePath).split('/').filter(Boolean).pop() || String(filePath);
+}
+
+function normalizeUploadPaths(value) {
+  const paths = Array.isArray(value) ? value : [value];
+  return paths
+    .map((entry) => typeof entry === 'string' ? entry.trim() : '')
+    .filter(Boolean);
+}
+
+async function waitForCondition(check, timeout = 1000, interval = 100) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeout) {
+    const result = await check();
+    if (result?.done) {
+      return result.value;
+    }
+    await new Promise((resolve) => setTimeout(resolve, interval));
+  }
+
+  return null;
+}
+
+async function waitForTabUrl(tabId, predicate, timeout = 10000) {
+  const startTime = Date.now();
+
+  while (Date.now() - startTime < timeout) {
+    const tab = await chrome.tabs.get(tabId);
+    if (predicate(tab.url || '')) {
+      return { success: true, url: tab.url, title: tab.title, tabId };
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+
+  const tab = await chrome.tabs.get(tabId);
+  return {
+    success: false,
+    error: 'Timeout',
+    url: tab.url,
+    title: tab.title,
+    tabId,
+  };
+}
+
+function serializeRemoteObject(arg) {
+  if (arg?.value !== undefined) return arg.value;
+  if (arg?.unserializableValue !== undefined) return arg.unserializableValue;
+  if (arg?.description) return arg.description;
+  return null;
+}
+
+function matchesText(value, expected, match = 'includes') {
+  const actual = String(value || '');
+  if (match === 'equals') return actual === expected;
+  if (match === 'regex') {
+    try {
+      return new RegExp(expected).test(actual);
+    } catch {
+      return false;
+    }
+  }
+  return actual.includes(expected);
+}
+
+function matchesNetworkEntry(entry, { url, match = 'includes', method = null, status = null }) {
+  if (!entry) return false;
+  if (!matchesText(entry.url || entry.finalUrl || '', url, match)) return false;
+  if (method && String(entry.method || '').toUpperCase() !== String(method).toUpperCase()) return false;
+  if (status !== null && status !== undefined && Number(entry.status) !== Number(status)) return false;
+  return true;
+}
+
+async function watchNetwork(tabId, {
+  reload = false,
+  timeout = 15000,
+  predicate,
+}) {
+  const observer = {
+    consoleEntries: [],
+    networkEntries: [],
+    requestMap: new Map(),
+    activeRequests: new Set(),
+    startedAt: Date.now(),
+    lastNetworkActivityAt: Date.now(),
+  };
+
+  activeObservers.set(tabId, observer);
+
+  try {
+    const dbg = await acquireDebugger(tabId);
+    try {
+      await dbg.send('Network.enable');
+
+      if (reload) {
+        await dbg.send('Page.enable');
+        await dbg.send('Page.reload', { ignoreCache: false });
+      }
+
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < Math.min(Math.max(timeout, 1000), 120000)) {
+        const decision = predicate(observer);
+        if (decision?.done) {
+          return decision.value;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+
+      return {
+        success: false,
+        error: 'Timeout',
+        observedRequests: Array.from(observer.requestMap.values()).slice(-20),
+      };
+    } finally {
+      releaseDebugger(tabId);
+    }
+  } finally {
+    activeObservers.delete(tabId);
+  }
+}
+
+async function collectDebugEvents(tabId, {
+  duration = 1000,
+  reload = false,
+  captureConsole = false,
+  captureNetwork = false,
+}) {
+  const clampedDuration = Math.min(Math.max(duration, 100), 10000);
+  const observer = {
+    consoleEntries: [],
+    networkEntries: [],
+    requestMap: new Map(),
+    startedAt: Date.now(),
+  };
+
+  activeObservers.set(tabId, observer);
+
+  try {
+    const dbg = await acquireDebugger(tabId);
+    try {
+      if (captureConsole) {
+        await dbg.send('Runtime.enable');
+        await dbg.send('Log.enable');
+      }
+
+      if (captureNetwork) {
+        await dbg.send('Network.enable');
+      }
+
+      if (reload) {
+        await dbg.send('Page.enable');
+        await dbg.send('Page.reload', { ignoreCache: false });
+      }
+
+      await new Promise((r) => setTimeout(r, clampedDuration));
+
+      return {
+        success: true,
+        duration: clampedDuration,
+        consoleEntries: observer.consoleEntries,
+        networkEntries: Array.from(observer.requestMap.values()).concat(observer.networkEntries),
+      };
+    } finally {
+      releaseDebugger(tabId);
+    }
+  } finally {
+    activeObservers.delete(tabId);
+  }
+}
+
 // Navigate to URL
 export async function navigate(url, tabId, sessionId) {
   const tab = await getTargetTab(tabId, sessionId);
@@ -102,18 +540,17 @@ export async function navigate(url, tabId, sessionId) {
 }
 
 // Take screenshot (full page or element)
-export async function screenshot(tabId, sessionId, selector = null) {
+export async function screenshot(tabId, sessionId, selector = null, fullPage = false) {
   const windowId = getWindowIdForSession(sessionId);
   if (sessionId && !windowId) {
     throw new Error(`ERR_NO_WINDOW: Session ${sessionId} has no window assigned. Use browser_navigate first.`);
   }
   const captureWindowId = windowId || null;
+  const tab = await getTargetTab(tabId, sessionId);
 
   // Get element bounds if selector provided
   let elementBounds = null;
   if (selector) {
-    const tab = await getTargetTab(tabId, sessionId);
-
     // Check for restricted URL when selector is used
     if (isRestrictedUrl(tab.url)) {
       return { error: 'Cannot query elements on restricted page', restricted: true, url: tab.url };
@@ -142,10 +579,84 @@ export async function screenshot(tabId, sessionId, selector = null) {
     }
   }
 
-  const jpegUrl = await chrome.tabs.captureVisibleTab(captureWindowId, {
-    format: 'jpeg',
-    quality: 90,
-  });
+  let jpegUrl;
+
+  if (fullPage && !elementBounds) {
+    const dbg = await acquireDebugger(tab.id);
+    try {
+      await dbg.send('Page.enable');
+
+      const layoutMetrics = await dbg.send('Page.getLayoutMetrics');
+      const { contentSize } = layoutMetrics || {};
+      const width = Math.ceil(contentSize?.width || 0);
+      const height = Math.min(Math.ceil(contentSize?.height || 0), 16384);
+
+      if (!width || !height) {
+        throw new Error('Full-page screenshot metrics were unavailable');
+      }
+
+      await dbg.send('Emulation.setDeviceMetricsOverride', {
+        mobile: false,
+        width,
+        height,
+        deviceScaleFactor: 1,
+      });
+
+      try {
+        const result = await dbg.send('Page.captureScreenshot', {
+          format: 'jpeg',
+          quality: 85,
+          captureBeyondViewport: true,
+        });
+
+        if (!result?.data) {
+          throw new Error('Full-page screenshot returned no data');
+        }
+
+        jpegUrl = `data:image/jpeg;base64,${result.data}`;
+      } finally {
+        try {
+          await dbg.send('Emulation.clearDeviceMetricsOverride');
+        } catch {
+          // Ignore cleanup failures.
+        }
+      }
+    } catch (captureError) {
+      return {
+        error: `Screenshot failed: ${captureError?.message || captureError}`,
+      };
+    } finally {
+      releaseDebugger(tab.id);
+    }
+  } else {
+    let shouldUseDebugger = false;
+
+    if (captureWindowId) {
+      try {
+        const window = await chrome.windows.get(captureWindowId);
+        shouldUseDebugger = !window.focused;
+      } catch {
+        shouldUseDebugger = false;
+      }
+    }
+
+    try {
+      jpegUrl = shouldUseDebugger
+        ? await captureScreenshotWithDebugger(tab.id)
+        : await chrome.tabs.captureVisibleTab(captureWindowId, {
+            format: 'jpeg',
+            quality: 90,
+          });
+    } catch (captureError) {
+      try {
+        jpegUrl = await captureScreenshotWithDebugger(tab.id);
+      } catch (debuggerError) {
+        return {
+          error: `Screenshot failed: ${captureError?.message || captureError}. Debugger fallback failed: ${debuggerError?.message || debuggerError}`,
+        };
+      }
+    }
+  }
 
   // Convert to WebP and optionally crop
   try {
@@ -154,7 +665,7 @@ export async function screenshot(tabId, sessionId, selector = null) {
     const bitmap = await createImageBitmap(blob);
 
     // Calculate device pixel ratio for accurate cropping
-    const dpr = bitmap.width / (await getViewportWidth(tabId, sessionId));
+    const dpr = bitmap.width / (await getViewportWidth(tab.id));
 
     let canvas;
     let ctx;
@@ -196,11 +707,10 @@ export async function screenshot(tabId, sessionId, selector = null) {
 }
 
 // Helper to get viewport width for DPR calculation
-async function getViewportWidth(tabId, sessionId) {
+async function getViewportWidth(tabId) {
   try {
-    const tab = await getTargetTab(tabId, sessionId);
     const results = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
+      target: { tabId },
       func: () => window.innerWidth,
     });
     return results[0]?.result || 1920;
@@ -229,6 +739,283 @@ export async function getContent(tabId, sessionId) {
 
   if (!ok) return { error, restricted };
   return result;
+}
+
+export async function getInteractables(tabId, sessionId, limit = 100) {
+  const tab = await getTargetTab(tabId, sessionId);
+
+  if (isRestrictedUrl(tab.url)) {
+    return { error: 'Cannot inspect interactable elements on restricted page', restricted: true, url: tab.url };
+  }
+
+  const { ok, result, error, restricted } = await safeExecuteScript(
+    tab.id,
+    (maxItems) => {
+      const selectors = [
+        'a[href]',
+        'button',
+        'input:not([type="hidden"])',
+        'textarea',
+        'select',
+        '[role="button"]',
+        '[role="link"]',
+        '[role="menuitem"]',
+        '[tabindex]:not([tabindex="-1"])',
+        '[contenteditable="true"]',
+      ];
+
+      const unique = new Set();
+      const elements = [];
+
+      const buildSelector = (element) => {
+        if (element.id) return `#${CSS.escape(element.id)}`;
+        const testId = element.getAttribute('data-testid');
+        if (testId) return `[data-testid="${CSS.escape(testId)}"]`;
+        const name = element.getAttribute('name');
+        if (name) return `${element.tagName.toLowerCase()}[name="${CSS.escape(name)}"]`;
+        const aria = element.getAttribute('aria-label');
+        if (aria) return `${element.tagName.toLowerCase()}[aria-label="${CSS.escape(aria)}"]`;
+
+        const path = [];
+        let current = element;
+        while (current && current.nodeType === Node.ELEMENT_NODE && path.length < 4) {
+          let part = current.tagName.toLowerCase();
+          const siblings = current.parentElement
+            ? Array.from(current.parentElement.children).filter((child) => child.tagName === current.tagName)
+            : [];
+          if (siblings.length > 1) {
+            const index = siblings.indexOf(current) + 1;
+            part += `:nth-of-type(${index})`;
+          }
+          path.unshift(part);
+          current = current.parentElement;
+        }
+        return path.join(' > ');
+      };
+
+      for (const selector of selectors) {
+        document.querySelectorAll(selector).forEach((element) => {
+          if (unique.has(element)) return;
+          unique.add(element);
+          elements.push(element);
+        });
+      }
+
+      const visible = elements
+        .map((element) => {
+          const rect = element.getBoundingClientRect();
+          const style = window.getComputedStyle(element);
+          const text = (
+            element.innerText ||
+            element.getAttribute('aria-label') ||
+            element.getAttribute('placeholder') ||
+            element.getAttribute('value') ||
+            ''
+          ).trim();
+
+          if (rect.width < 4 || rect.height < 4) return null;
+          if (style.visibility === 'hidden' || style.display === 'none') return null;
+          if (rect.bottom < 0 || rect.right < 0) return null;
+
+          return {
+            selector: buildSelector(element),
+            tagName: element.tagName,
+            type: element.getAttribute('type') || null,
+            role: element.getAttribute('role') || null,
+            text: text.substring(0, 120),
+            disabled: !!element.disabled || element.getAttribute('aria-disabled') === 'true',
+            href: element.href || null,
+            bounds: {
+              x: Math.round(rect.left),
+              y: Math.round(rect.top),
+              width: Math.round(rect.width),
+              height: Math.round(rect.height),
+            },
+          };
+        })
+        .filter(Boolean)
+        .slice(0, maxItems);
+
+      return {
+        count: visible.length,
+        interactables: visible,
+      };
+    },
+    [Math.min(Math.max(limit, 1), 200)]
+  );
+
+  if (!ok) return { error, restricted };
+  return result;
+}
+
+export async function getSemanticSnapshot(tabId, sessionId, limit = 20) {
+  const tab = await getTargetTab(tabId, sessionId);
+
+  if (isRestrictedUrl(tab.url)) {
+    return { error: 'Cannot inspect semantic page structure on restricted page', restricted: true, url: tab.url };
+  }
+
+  const { ok, result, error, restricted } = await safeExecuteScript(
+    tab.id,
+    (maxItems) => {
+      const clamp = (items) => items.filter(Boolean).slice(0, maxItems);
+      const textOf = (element) => (
+        element?.innerText ||
+        element?.textContent ||
+        element?.getAttribute?.('aria-label') ||
+        element?.getAttribute?.('placeholder') ||
+        ''
+      ).replace(/\s+/g, ' ').trim().slice(0, 160);
+
+      const selectorOf = (element) => {
+        if (!element) return null;
+        if (element.id) return `#${CSS.escape(element.id)}`;
+        const name = element.getAttribute('name');
+        if (name) return `${element.tagName.toLowerCase()}[name="${CSS.escape(name)}"]`;
+        const role = element.getAttribute('role');
+        if (role) return `${element.tagName.toLowerCase()}[role="${CSS.escape(role)}"]`;
+        return element.tagName.toLowerCase();
+      };
+
+      const landmarks = clamp(
+        Array.from(document.querySelectorAll('main, nav, header, footer, aside, section, [role]')).map((element) => {
+          const role = element.getAttribute('role') || element.tagName.toLowerCase();
+          if (!['main', 'nav', 'header', 'footer', 'aside', 'section', 'form', 'search', 'dialog', 'banner', 'contentinfo', 'region', 'complementary'].includes(role)) {
+            return null;
+          }
+          return {
+            role,
+            label: element.getAttribute('aria-label') || textOf(element),
+            selector: selectorOf(element),
+          };
+        })
+      );
+
+      const headings = clamp(
+        Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6, [role="heading"]')).map((element) => ({
+          level: Number(element.getAttribute('aria-level') || element.tagName.replace('H', '') || 0) || null,
+          text: textOf(element),
+          selector: selectorOf(element),
+        }))
+      );
+
+      const forms = clamp(
+        Array.from(document.querySelectorAll('form')).map((form) => {
+          const controls = Array.from(form.querySelectorAll('input, textarea, select, button')).slice(0, maxItems).map((control) => ({
+            tagName: control.tagName,
+            type: control.getAttribute('type') || null,
+            name: control.getAttribute('name') || null,
+            label: control.getAttribute('aria-label') || control.getAttribute('placeholder') || textOf(control.labels?.[0]) || textOf(control),
+            selector: selectorOf(control),
+          }));
+
+          return {
+            selector: selectorOf(form),
+            action: form.getAttribute('action') || null,
+            method: (form.getAttribute('method') || 'get').toUpperCase(),
+            controls,
+          };
+        })
+      );
+
+      const primaryActions = clamp(
+        Array.from(document.querySelectorAll('a[href], button, input[type="submit"], [role="button"]')).map((element) => {
+          const rect = element.getBoundingClientRect();
+          if (rect.width < 4 || rect.height < 4) return null;
+          return {
+            tagName: element.tagName,
+            text: textOf(element),
+            href: element.href || null,
+            selector: selectorOf(element),
+          };
+        })
+      );
+
+      return {
+        title: document.title,
+        url: window.location.href,
+        landmarks,
+        headings,
+        forms,
+        primaryActions,
+        counts: {
+          links: document.links.length,
+          buttons: document.querySelectorAll('button, input[type="submit"], [role="button"]').length,
+          forms: document.forms.length,
+          headings: document.querySelectorAll('h1, h2, h3, h4, h5, h6, [role="heading"]').length,
+        },
+      };
+    },
+    [Math.min(Math.max(limit, 1), 50)]
+  );
+
+  if (!ok) return { error, restricted };
+  return result;
+}
+
+export async function getConsoleLogs(tabId, sessionId, duration = 1000, reload = false) {
+  const tab = await getTargetTab(tabId, sessionId);
+
+  if (isRestrictedUrl(tab.url)) {
+    return { success: false, error: 'Cannot collect console logs on restricted page', restricted: true, url: tab.url };
+  }
+
+  const result = await collectDebugEvents(tab.id, {
+    duration,
+    reload,
+    captureConsole: true,
+  });
+
+  return {
+    success: true,
+    duration: result.duration,
+    entries: result.consoleEntries,
+    tabId: tab.id,
+  };
+}
+
+export async function getNetworkRequests(tabId, sessionId, duration = 1000, reload = false) {
+  const tab = await getTargetTab(tabId, sessionId);
+
+  if (isRestrictedUrl(tab.url)) {
+    return { success: false, error: 'Cannot collect network requests on restricted page', restricted: true, url: tab.url };
+  }
+
+  const debugResult = await collectDebugEvents(tab.id, {
+    duration,
+    reload,
+    captureNetwork: true,
+  });
+
+  const { ok, result, error, restricted } = await safeExecuteScript(
+    tab.id,
+    () => ({
+      navigation: performance.getEntriesByType('navigation').slice(0, 1).map((entry) => ({
+        name: entry.name,
+        type: entry.type,
+        duration: Math.round(entry.duration),
+        domContentLoaded: Math.round(entry.domContentLoadedEventEnd),
+        loadEventEnd: Math.round(entry.loadEventEnd),
+      })),
+      resources: performance.getEntriesByType('resource').slice(-100).map((entry) => ({
+        name: entry.name,
+        initiatorType: entry.initiatorType,
+        duration: Math.round(entry.duration),
+        transferSize: entry.transferSize,
+        encodedBodySize: entry.encodedBodySize,
+      })),
+    })
+  );
+
+  if (!ok) return { success: false, error, restricted };
+
+  return {
+    success: true,
+    duration: debugResult.duration,
+    requests: debugResult.networkEntries,
+    performance: result,
+    tabId: tab.id,
+  };
 }
 
 // Get element text content (bypasses CSP, no eval)
@@ -283,7 +1070,7 @@ export async function getUrl(tabId, sessionId) {
 }
 
 // Click element by selector
-export async function click(selector, tabId, sessionId) {
+export async function click(selector, tabId, sessionId, verify = false, verifyTimeout = 150) {
   const tab = await getTargetTab(tabId, sessionId);
 
   if (isRestrictedUrl(tab.url)) {
@@ -295,8 +1082,14 @@ export async function click(selector, tabId, sessionId) {
     (sel) => {
       const element = document.querySelector(sel);
       if (element) {
-        element.click();
-        return { success: true, selector: sel };
+        element.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        const rect = element.getBoundingClientRect();
+        return {
+          success: true,
+          selector: sel,
+          x: Math.round(rect.left + rect.width / 2),
+          y: Math.round(rect.top + rect.height / 2),
+        };
       }
       return { success: false, error: 'Element not found' };
     },
@@ -304,32 +1097,143 @@ export async function click(selector, tabId, sessionId) {
   );
 
   if (!ok) return { success: false, error, restricted };
-  return result;
+  if (!result.success) return result;
+
+  const clickResult = await clickAt(
+    result.x,
+    result.y,
+    tab.id,
+    sessionId,
+    verify,
+    verifyTimeout
+  );
+
+  return {
+    ...clickResult,
+    selector,
+  };
+}
+
+export async function rightClick(selector, tabId, sessionId) {
+  const tab = await getTargetTab(tabId, sessionId);
+
+  if (isRestrictedUrl(tab.url)) {
+    return { success: false, error: 'Cannot right-click on restricted page', restricted: true };
+  }
+
+  const { ok, result, error, restricted } = await safeExecuteScript(
+    tab.id,
+    (sel) => {
+      const element = document.querySelector(sel);
+      if (element) {
+        element.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        const rect = element.getBoundingClientRect();
+        return {
+          success: true,
+          selector: sel,
+          x: Math.round(rect.left + rect.width / 2),
+          y: Math.round(rect.top + rect.height / 2),
+        };
+      }
+      return { success: false, error: 'Element not found' };
+    },
+    [selector]
+  );
+
+  if (!ok) return { success: false, error, restricted };
+  if (!result.success) return result;
+
+  try {
+    await dispatchMouseSequence(tab.id, result.x, result.y, {
+      button: 'right',
+      clickCount: 1,
+      repeatCount: 1,
+    });
+  } catch (nativeError) {
+    return { success: false, error: nativeError?.message || String(nativeError) };
+  }
+
+  return { success: true, selector };
+}
+
+export async function doubleClick(selector, tabId, sessionId) {
+  const tab = await getTargetTab(tabId, sessionId);
+
+  if (isRestrictedUrl(tab.url)) {
+    return { success: false, error: 'Cannot double-click on restricted page', restricted: true };
+  }
+
+  const { ok, result, error, restricted } = await safeExecuteScript(
+    tab.id,
+    (sel) => {
+      const element = document.querySelector(sel);
+      if (element) {
+        element.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        const rect = element.getBoundingClientRect();
+        return {
+          success: true,
+          selector: sel,
+          x: Math.round(rect.left + rect.width / 2),
+          y: Math.round(rect.top + rect.height / 2),
+        };
+      }
+      return { success: false, error: 'Element not found' };
+    },
+    [selector]
+  );
+
+  if (!ok) return { success: false, error, restricted };
+  if (!result.success) return result;
+
+  try {
+    await dispatchMouseSequence(tab.id, result.x, result.y, {
+      button: 'left',
+      clickCount: 2,
+      repeatCount: 2,
+    });
+  } catch (nativeError) {
+    return { success: false, error: nativeError?.message || String(nativeError) };
+  }
+
+  return { success: true, selector };
 }
 
 // Type text into element
-export async function type(selector, text, tabId, sessionId) {
+export async function type(selector, text, tabId, sessionId, verify = false, verifyTimeout = 1000) {
   const tab = await getTargetTab(tabId, sessionId);
 
   if (isRestrictedUrl(tab.url)) {
     return { success: false, error: 'Cannot type on restricted page', restricted: true };
   }
 
-  // Encode text to avoid "Value is unserializable" in chrome.scripting.executeScript args.
-  // Special characters (lone surrogates, certain Unicode) can fail structured clone;
-  // encodeURIComponent produces safe ASCII, decoded in the page via decodeURIComponent.
-  let encodedText;
-  try {
-    encodedText = encodeURIComponent(text);
-  } catch (e) {
-    // Lone surrogates in the string cause encodeURIComponent to throw — strip them
-    encodedText = encodeURIComponent(text.replace(/[\uD800-\uDFFF]/g, '\uFFFD'));
-  }
-
   const { ok, result, error, restricted } = await safeExecuteScript(
     tab.id,
-    (sel, enc) => {
-      const txt = decodeURIComponent(enc);
+    (sel) => {
+      const element = document.querySelector(sel);
+      if (!element) {
+        return { success: false, error: 'Element not found' };
+      }
+
+      element.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+      const rect = element.getBoundingClientRect();
+      return {
+        success: true,
+        selector: sel,
+        x: Math.round(rect.left + rect.width / 2),
+        y: Math.round(rect.top + rect.height / 2),
+      };
+    },
+    [selector]
+  );
+
+  if (!ok) return { success: false, error, restricted };
+  if (!result.success) return result;
+
+  await dispatchNativeClick(tab.id, result.x, result.y);
+
+  const clearResult = await safeExecuteScript(
+    tab.id,
+    (sel) => {
       const element = document.querySelector(sel);
       if (!element) {
         return { success: false, error: 'Element not found' };
@@ -337,35 +1241,95 @@ export async function type(selector, text, tabId, sessionId) {
 
       element.focus();
 
-      if (
-        'value' in element &&
-        (element.tagName === 'INPUT' || element.tagName === 'TEXTAREA')
-      ) {
-        element.value = txt;
+      if ('value' in element && (element.tagName === 'INPUT' || element.tagName === 'TEXTAREA')) {
+        element.value = '';
         element.dispatchEvent(new Event('input', { bubbles: true }));
-        element.dispatchEvent(new Event('change', { bubbles: true }));
-      } else if (
-        element.isContentEditable ||
-        element.contentEditable === 'true'
-      ) {
-        element.innerHTML = '';
-        document.execCommand('insertText', false, txt);
-        element.dispatchEvent(
-          new InputEvent('input', { bubbles: true, data: txt })
-        );
-      } else {
-        element.innerText = txt;
-        element.dispatchEvent(new Event('input', { bubbles: true }));
+        return { success: true };
       }
 
-      // Don't echo text back — it could itself be unserializable
-      return { success: true, selector: sel };
+      if (element.isContentEditable || element.contentEditable === 'true') {
+        element.innerHTML = '';
+        element.dispatchEvent(new InputEvent('input', { bubbles: true, data: '' }));
+        return { success: true };
+      }
+
+      return { success: true };
     },
-    [selector, encodedText]
+    [selector]
   );
 
-  if (!ok) return { success: false, error, restricted };
-  return result;
+  if (!clearResult.ok) return { success: false, error: clearResult.error, restricted: clearResult.restricted };
+
+  await insertNativeText(tab.id, text);
+
+  if (!verify) {
+    return { success: true, selector };
+  }
+
+  const verification = await waitForCondition(async () => {
+    const { ok, result, error, restricted } = await safeExecuteScript(
+      tab.id,
+      (sel, expected) => {
+        const element = document.querySelector(sel);
+        if (!element) {
+          return { success: false, error: 'Element not found' };
+        }
+
+        let actual = '';
+        if ('value' in element && typeof element.value === 'string') {
+          actual = element.value;
+        } else if (element.isContentEditable || element.contentEditable === 'true') {
+          actual = element.innerText || element.textContent || '';
+        } else {
+          actual = element.innerText || element.textContent || '';
+        }
+
+        return {
+          success: true,
+          actual,
+          matches: actual === expected || actual.includes(expected),
+        };
+      },
+      [selector, text]
+    );
+
+    if (!ok) {
+      return {
+        done: true,
+        value: { success: false, error, restricted },
+      };
+    }
+
+    if (!result.success) {
+      return {
+        done: true,
+        value: result,
+      };
+    }
+
+    if (result.matches) {
+      return {
+        done: true,
+        value: {
+          success: true,
+          actual: result.actual,
+          matches: true,
+        },
+      };
+    }
+
+    return { done: false };
+  }, Math.min(verifyTimeout, 10000));
+
+  return {
+    success: true,
+    selector,
+    verification: verification || {
+      success: false,
+      matches: false,
+      error: 'Timeout',
+    },
+  };
 }
 
 // Hover over element
@@ -506,7 +1470,7 @@ export async function clickAt(x, y, tabId, sessionId, verify = false, verifyTime
     return { success: false, error: 'Cannot click on restricted page', restricted: true };
   }
 
-  // Step 1: Click and capture pre-state
+  // Step 1: Capture pre-state
   const { ok: clickOk, result: clickResult, error: clickError, restricted: clickRestricted } = await safeExecuteScript(
     tab.id,
     (clickX, clickY, shouldVerify) => {
@@ -534,18 +1498,6 @@ export async function clickAt(x, y, tabId, sessionId, verify = false, verifyTime
         };
       }
 
-      // Dispatch click events
-      ['mousedown', 'mouseup', 'click'].forEach(eventType => {
-        element.dispatchEvent(new MouseEvent(eventType, {
-          bubbles: true,
-          cancelable: true,
-          view: window,
-          clientX: clickX,
-          clientY: clickY,
-          button: 0,
-        }));
-      });
-
       return {
         success: true,
         x: clickX,
@@ -563,6 +1515,11 @@ export async function clickAt(x, y, tabId, sessionId, verify = false, verifyTime
   );
 
   if (!clickOk) return { success: false, error: clickError, restricted: clickRestricted };
+  try {
+    await dispatchNativeClick(tab.id, x, y);
+  } catch (nativeError) {
+    return { success: false, error: nativeError?.message || String(nativeError) };
+  }
   if (!clickResult.success || !verify) {
     // Remove internal state from response
     delete clickResult.preState;
@@ -703,7 +1660,7 @@ export async function findText(
 }
 
 // Press a keyboard key (Enter, Tab, Escape, etc.)
-export async function pressKey(key, selector = null, tabId, sessionId) {
+export async function pressKey(key, selector = null, tabId, sessionId, verify = false, verifyTimeout = 300) {
   const tab = await getTargetTab(tabId, sessionId);
 
   if (isRestrictedUrl(tab.url)) {
@@ -712,7 +1669,27 @@ export async function pressKey(key, selector = null, tabId, sessionId) {
 
   const { ok, result, error, restricted } = await safeExecuteScript(
     tab.id,
-    (keyName, sel) => {
+    (sel, shouldVerify) => {
+      const captureState = () => {
+        const activeElement = document.activeElement;
+        const selectedElement = sel ? document.querySelector(sel) : null;
+        const target = selectedElement || activeElement || document.body;
+
+        return {
+          url: window.location.href,
+          focusedTag: activeElement?.tagName || null,
+          focusedId: activeElement?.id || null,
+          activeValue: activeElement && 'value' in activeElement ? String(activeElement.value ?? '') : '',
+          activeText: activeElement?.innerText || activeElement?.textContent || '',
+          targetValue: target && 'value' in target ? String(target.value ?? '') : '',
+          targetText: target?.innerText || target?.textContent || '',
+          scrollX: window.scrollX,
+          scrollY: window.scrollY,
+          modals: document.querySelectorAll('[role="dialog"], .modal, [aria-modal="true"]').length,
+          dropdowns: document.querySelectorAll('[role="listbox"], [role="menu"]').length,
+        };
+      };
+
       let target = document.activeElement || document.body;
       if (sel) {
         const element = document.querySelector(sel);
@@ -721,40 +1698,699 @@ export async function pressKey(key, selector = null, tabId, sessionId) {
           target = element;
         }
       }
-
-      const keyMap = {
-        'Enter': { key: 'Enter', code: 'Enter', keyCode: 13 },
-        'Tab': { key: 'Tab', code: 'Tab', keyCode: 9 },
-        'Escape': { key: 'Escape', code: 'Escape', keyCode: 27 },
-        'Backspace': { key: 'Backspace', code: 'Backspace', keyCode: 8 },
-        'ArrowUp': { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38 },
-        'ArrowDown': { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 },
-        'ArrowLeft': { key: 'ArrowLeft', code: 'ArrowLeft', keyCode: 37 },
-        'ArrowRight': { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 },
+      return {
+        success: true,
+        target: target.tagName,
+        preState: shouldVerify ? captureState() : null,
       };
-
-      const keyInfo = keyMap[keyName] || { key: keyName, code: keyName, keyCode: 0 };
-
-      const eventOptions = {
-        key: keyInfo.key,
-        code: keyInfo.code,
-        keyCode: keyInfo.keyCode,
-        which: keyInfo.keyCode,
-        bubbles: true,
-        cancelable: true,
-      };
-
-      target.dispatchEvent(new KeyboardEvent('keydown', eventOptions));
-      target.dispatchEvent(new KeyboardEvent('keypress', eventOptions));
-      target.dispatchEvent(new KeyboardEvent('keyup', eventOptions));
-
-      return { success: true, key: keyName, target: target.tagName };
     },
-    [key, selector]
+    [selector, verify]
+  );
+
+  if (!ok) return { success: false, error, restricted };
+  if (!result.success) return result;
+
+  await dispatchNativeKey(tab.id, key);
+
+  if (!verify) {
+    return { success: true, key, target: result.target };
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, Math.min(verifyTimeout, 1000)));
+
+  const postState = await safeExecuteScript(
+    tab.id,
+    (sel, before) => {
+      const captureState = () => {
+        const activeElement = document.activeElement;
+        const selectedElement = sel ? document.querySelector(sel) : null;
+        const target = selectedElement || activeElement || document.body;
+
+        return {
+          url: window.location.href,
+          focusedTag: activeElement?.tagName || null,
+          focusedId: activeElement?.id || null,
+          activeValue: activeElement && 'value' in activeElement ? String(activeElement.value ?? '') : '',
+          activeText: activeElement?.innerText || activeElement?.textContent || '',
+          targetValue: target && 'value' in target ? String(target.value ?? '') : '',
+          targetText: target?.innerText || target?.textContent || '',
+          scrollX: window.scrollX,
+          scrollY: window.scrollY,
+          modals: document.querySelectorAll('[role="dialog"], .modal, [aria-modal="true"]').length,
+          dropdowns: document.querySelectorAll('[role="listbox"], [role="menu"]').length,
+        };
+      };
+
+      const after = captureState();
+      const changes = [];
+
+      if (before.url !== after.url) changes.push({ type: 'url', to: after.url });
+      if (before.focusedTag !== after.focusedTag || before.focusedId !== after.focusedId) {
+        changes.push({ type: 'focus', to: { tag: after.focusedTag, id: after.focusedId } });
+      }
+      if (before.activeValue !== after.activeValue) changes.push({ type: 'activeValue' });
+      if (before.activeText !== after.activeText) changes.push({ type: 'activeText' });
+      if (before.targetValue !== after.targetValue) changes.push({ type: 'targetValue' });
+      if (before.targetText !== after.targetText) changes.push({ type: 'targetText' });
+      if (before.scrollX !== after.scrollX || before.scrollY !== after.scrollY) {
+        changes.push({ type: 'scroll', to: { x: after.scrollX, y: after.scrollY } });
+      }
+      if (after.modals > before.modals) changes.push({ type: 'modal' });
+      if (after.dropdowns > before.dropdowns) changes.push({ type: 'dropdown' });
+
+      return {
+        hadEffect: changes.length > 0,
+        changes,
+      };
+    },
+    [selector, result.preState]
+  );
+
+  if (!postState.ok) {
+    return {
+      success: true,
+      key,
+      target: result.target,
+      verification: { success: false, error: postState.error, restricted: postState.restricted },
+    };
+  }
+
+  return {
+    success: true,
+    key,
+    target: result.target,
+    verification: postState.result,
+  };
+}
+
+export async function pressKeys(keys, selector = null, tabId, sessionId) {
+  const tab = await getTargetTab(tabId, sessionId);
+
+  if (isRestrictedUrl(tab.url)) {
+    return { success: false, error: 'Cannot press keys on restricted page', restricted: true };
+  }
+
+  const keyList = Array.isArray(keys) ? keys.map((key) => String(key)) : [];
+  if (keyList.length === 0) {
+    return { success: false, error: 'No keys provided' };
+  }
+
+  const modifierBits = {
+    Alt: 1,
+    Control: 2,
+    Meta: 4,
+    Shift: 8,
+  };
+
+  const normalizeKeyInfo = (keyName) => {
+    const key = String(keyName);
+    const lower = key.toLowerCase();
+
+    if (lower === 'control' || lower === 'ctrl') {
+      return { key: 'Control', code: 'ControlLeft', keyCode: 17, bit: modifierBits.Control, modifier: true };
+    }
+    if (lower === 'shift') {
+      return { key: 'Shift', code: 'ShiftLeft', keyCode: 16, bit: modifierBits.Shift, modifier: true };
+    }
+    if (lower === 'alt' || lower === 'option') {
+      return { key: 'Alt', code: 'AltLeft', keyCode: 18, bit: modifierBits.Alt, modifier: true };
+    }
+    if (lower === 'meta' || lower === 'cmd' || lower === 'command') {
+      return { key: 'Meta', code: 'MetaLeft', keyCode: 91, bit: modifierBits.Meta, modifier: true };
+    }
+    if (key.length === 1) {
+      const upper = key.toUpperCase();
+      const isLetter = /^[A-Z]$/.test(upper);
+      return {
+        key,
+        code: isLetter ? `Key${upper}` : `Key${upper}`,
+        keyCode: upper.charCodeAt(0),
+        text: key,
+        modifier: false,
+      };
+    }
+
+    const specialKeyMap = {
+      Enter: { key: 'Enter', code: 'Enter', keyCode: 13 },
+      Tab: { key: 'Tab', code: 'Tab', keyCode: 9 },
+      Escape: { key: 'Escape', code: 'Escape', keyCode: 27 },
+      Backspace: { key: 'Backspace', code: 'Backspace', keyCode: 8 },
+      ArrowUp: { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38 },
+      ArrowDown: { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 },
+      ArrowLeft: { key: 'ArrowLeft', code: 'ArrowLeft', keyCode: 37 },
+      ArrowRight: { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 },
+      Delete: { key: 'Delete', code: 'Delete', keyCode: 46 },
+      Home: { key: 'Home', code: 'Home', keyCode: 36 },
+      End: { key: 'End', code: 'End', keyCode: 35 },
+      PageUp: { key: 'PageUp', code: 'PageUp', keyCode: 33 },
+      PageDown: { key: 'PageDown', code: 'PageDown', keyCode: 34 },
+      Space: { key: ' ', code: 'Space', keyCode: 32, text: ' ' },
+    };
+
+    const special = specialKeyMap[key];
+    if (special) {
+      return { ...special, modifier: false };
+    }
+
+    return { key, code: key, keyCode: 0, modifier: false };
+  };
+
+  const prefixKeys = keyList.slice(0, -1);
+  const finalKey = keyList[keyList.length - 1];
+  const heldModifiers = [];
+  let modifiersMask = 0;
+
+  const { ok, result, error, restricted } = await safeExecuteScript(
+    tab.id,
+    (sel) => {
+      const element = sel ? document.querySelector(sel) : document.activeElement;
+      if (sel && !element) {
+        return { success: false, error: `Element not found: ${sel}` };
+      }
+
+      if (element && element !== document.body) {
+        element.focus?.();
+        element.scrollIntoView?.({ block: 'center', inline: 'center', behavior: 'instant' });
+      }
+
+      return { success: true };
+    },
+    [selector]
+  );
+
+  if (!ok) return { success: false, error, restricted };
+  if (!result.success) return result;
+
+  const dbg = await acquireDebugger(tab.id);
+  try {
+    for (const keyName of prefixKeys) {
+      const info = normalizeKeyInfo(keyName);
+      if (info.modifier) {
+        heldModifiers.push(info);
+        modifiersMask |= info.bit || 0;
+      }
+
+      await dbg.send('Input.dispatchKeyEvent', {
+        type: 'keyDown',
+        key: info.key,
+        code: info.code,
+        windowsVirtualKeyCode: info.keyCode,
+        nativeVirtualKeyCode: info.keyCode,
+        modifiers: modifiersMask,
+        text: info.text,
+        unmodifiedText: info.text,
+      });
+    }
+
+    const finalInfo = normalizeKeyInfo(finalKey);
+    const finalHasText = Boolean(finalInfo.text || finalKey.length === 1);
+    const finalText = finalInfo.text || (finalKey.length === 1 ? finalKey : undefined);
+
+    await dbg.send('Input.dispatchKeyEvent', {
+      type: finalHasText ? 'keyDown' : 'rawKeyDown',
+      key: finalInfo.key,
+      code: finalInfo.code,
+      windowsVirtualKeyCode: finalInfo.keyCode,
+      nativeVirtualKeyCode: finalInfo.keyCode,
+      modifiers: modifiersMask,
+      text: finalText,
+      unmodifiedText: finalText,
+    });
+
+    if (finalHasText) {
+      await dbg.send('Input.dispatchKeyEvent', {
+        type: 'char',
+        key: finalInfo.key,
+        code: finalInfo.code,
+        windowsVirtualKeyCode: finalInfo.keyCode,
+        nativeVirtualKeyCode: finalInfo.keyCode,
+        modifiers: modifiersMask,
+        text: finalText,
+        unmodifiedText: finalText,
+      });
+    }
+
+    await dbg.send('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: finalInfo.key,
+      code: finalInfo.code,
+      windowsVirtualKeyCode: finalInfo.keyCode,
+      nativeVirtualKeyCode: finalInfo.keyCode,
+      modifiers: modifiersMask,
+      text: finalText,
+      unmodifiedText: finalText,
+    });
+
+    for (let i = heldModifiers.length - 1; i >= 0; i -= 1) {
+      const info = heldModifiers[i];
+      modifiersMask &= ~(info.bit || 0);
+      await dbg.send('Input.dispatchKeyEvent', {
+        type: 'keyUp',
+        key: info.key,
+        code: info.code,
+        windowsVirtualKeyCode: info.keyCode,
+        nativeVirtualKeyCode: info.keyCode,
+        modifiers: modifiersMask,
+      });
+    }
+
+    return {
+      success: true,
+      keys: keyList,
+      selector: selector || null,
+    };
+  } finally {
+    releaseDebugger(tab.id);
+  }
+}
+
+export async function selectOption(selector, value, tabId, sessionId) {
+  const tab = await getTargetTab(tabId, sessionId);
+
+  if (isRestrictedUrl(tab.url)) {
+    return { success: false, error: 'Cannot select on restricted page', restricted: true };
+  }
+
+  const { ok, result, error, restricted } = await safeExecuteScript(
+    tab.id,
+    (sel, expected) => {
+      const element = document.querySelector(sel);
+      if (!element) {
+        return { success: false, error: `Element not found: ${sel}` };
+      }
+
+      if (element.tagName !== 'SELECT') {
+        return { success: false, error: 'Target element is not a <select>' };
+      }
+
+      const targetValue = String(expected ?? '').trim();
+      const options = Array.from(element.options || []);
+      const normalize = (text) => String(text ?? '').trim();
+
+      let matchedOption = options.find((option) => normalize(option.value) === targetValue);
+      if (!matchedOption) {
+        matchedOption = options.find((option) => normalize(option.textContent) === targetValue);
+      }
+      if (!matchedOption) {
+        const lowerExpected = targetValue.toLowerCase();
+        matchedOption = options.find((option) => normalize(option.value).toLowerCase() === lowerExpected);
+      }
+      if (!matchedOption) {
+        const lowerExpected = targetValue.toLowerCase();
+        matchedOption = options.find((option) => normalize(option.textContent).toLowerCase() === lowerExpected);
+      }
+
+      if (!matchedOption) {
+        return { success: false, error: `No option matched value or text: ${expected}` };
+      }
+
+      element.value = matchedOption.value;
+      element.dispatchEvent(new Event('input', { bubbles: true }));
+      element.dispatchEvent(new Event('change', { bubbles: true }));
+
+      return {
+        success: true,
+        selector: sel,
+        selectedValue: matchedOption.value,
+        selectedText: matchedOption.textContent?.trim() || '',
+      };
+    },
+    [selector, value]
   );
 
   if (!ok) return { success: false, error, restricted };
   return result;
+}
+
+export async function dragAndDrop(sourceSelector, targetSelector, tabId, sessionId) {
+  const tab = await getTargetTab(tabId, sessionId);
+
+  if (isRestrictedUrl(tab.url)) {
+    return { success: false, error: 'Cannot drag and drop on restricted page', restricted: true };
+  }
+
+  const { ok, result, error, restricted } = await safeExecuteScript(
+    tab.id,
+    (sourceSel, targetSel) => {
+      const source = document.querySelector(sourceSel);
+      const target = document.querySelector(targetSel);
+
+      if (!source) return { success: false, error: `Source element not found: ${sourceSel}` };
+      if (!target) return { success: false, error: `Target element not found: ${targetSel}` };
+
+      source.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+      target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+
+      const dataTransfer = new DataTransfer();
+      const sourceText = (source.innerText || source.textContent || '').trim();
+
+      const fire = (element, type) => {
+        const event = new DragEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          dataTransfer,
+        });
+        return element.dispatchEvent(event);
+      };
+
+      fire(source, 'pointerdown');
+      fire(source, 'mousedown');
+      const dragStartAccepted = fire(source, 'dragstart');
+      fire(target, 'dragenter');
+      fire(target, 'dragover');
+      const dropAccepted = fire(target, 'drop');
+      fire(source, 'dragend');
+      fire(target, 'mouseup');
+
+      return {
+        success: true,
+        sourceSelector: sourceSel,
+        targetSelector: targetSel,
+        sourceTag: source.tagName,
+        targetTag: target.tagName,
+        sourceText: sourceText.slice(0, 120),
+        dragStartAccepted,
+        dropAccepted,
+      };
+    },
+    [sourceSelector, targetSelector]
+  );
+
+  if (!ok) return { success: false, error, restricted };
+  return result;
+}
+
+export async function uploadFile(selector, filePaths, tabId, sessionId, verify = false, verifyTimeout = 1000) {
+  const tab = await getTargetTab(tabId, sessionId);
+
+  if (isRestrictedUrl(tab.url)) {
+    return { success: false, error: 'Cannot upload files on restricted page', restricted: true };
+  }
+
+  const paths = normalizeUploadPaths(filePaths);
+  if (!paths.length) {
+    return { success: false, error: 'No file paths provided' };
+  }
+
+  if (paths.some((entry) => !entry.startsWith('/'))) {
+    return { success: false, error: 'File paths must be absolute' };
+  }
+
+  const fileNames = paths.map(getFileNameFromPath);
+  const preCheck = await safeExecuteScript(
+    tab.id,
+    (sel) => {
+      const element = document.querySelector(sel);
+      if (!element) {
+        return { success: false, error: 'Element not found' };
+      }
+
+      if (element.tagName !== 'INPUT' || element.type !== 'file') {
+        return { success: false, error: 'Target element is not an <input type=file>' };
+      }
+
+      element.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+
+      return {
+        success: true,
+        multiple: element.multiple,
+        accept: element.accept || '',
+        existingFiles: Array.from(element.files || []).map((file) => file.name),
+      };
+    },
+    [selector]
+  );
+
+  if (!preCheck.ok) {
+    return { success: false, error: preCheck.error, restricted: preCheck.restricted };
+  }
+  if (!preCheck.result.success) {
+    return preCheck.result;
+  }
+
+  if (!preCheck.result.multiple && paths.length > 1) {
+    return { success: false, error: 'Target file input does not accept multiple files' };
+  }
+
+  const dbg = await acquireDebugger(tab.id);
+  try {
+    await dbg.send('DOM.enable');
+    const { root } = await dbg.send('DOM.getDocument', { depth: -1, pierce: true });
+    const { nodeId } = await dbg.send('DOM.querySelector', {
+      nodeId: root.nodeId,
+      selector,
+    });
+
+    if (!nodeId) {
+      throw new Error(`Element not found: ${selector}`);
+    }
+
+    await dbg.send('DOM.setFileInputFiles', {
+      nodeId,
+      files: paths,
+    });
+  } finally {
+    releaseDebugger(tab.id);
+  }
+
+  if (!verify) {
+    return {
+      success: true,
+      selector,
+      fileNames,
+      fileCount: paths.length,
+      multiple: preCheck.result.multiple,
+    };
+  }
+
+  const verification = await waitForCondition(async () => {
+    const { ok, result, error, restricted } = await safeExecuteScript(
+      tab.id,
+      (sel, expectedNames) => {
+        const element = document.querySelector(sel);
+        if (!element) {
+          return { success: false, error: 'Element not found' };
+        }
+
+        const selectedNames = Array.from(element.files || []).map((file) => file.name);
+        const matches =
+          selectedNames.length === expectedNames.length &&
+          expectedNames.every((name) => selectedNames.includes(name));
+
+        return {
+          success: true,
+          selectedNames,
+          fileCount: selectedNames.length,
+          matches,
+        };
+      },
+      [selector, fileNames]
+    );
+
+    if (!ok) {
+      return {
+        done: true,
+        value: { success: false, error, restricted },
+      };
+    }
+
+    if (!result.success) {
+      return { done: true, value: result };
+    }
+
+    if (result.matches) {
+      return {
+        done: true,
+        value: {
+          success: true,
+          fileCount: result.fileCount,
+          selectedNames: result.selectedNames,
+          matches: true,
+        },
+      };
+    }
+
+    return { done: false };
+  }, Math.min(verifyTimeout, 10000));
+
+  return {
+    success: true,
+    selector,
+    fileNames,
+    fileCount: paths.length,
+    multiple: preCheck.result.multiple,
+    verification: verification || {
+      success: false,
+      matches: false,
+      error: 'Timeout',
+    },
+  };
+}
+
+export async function reload(tabId, sessionId) {
+  const tab = await getTargetTab(tabId, sessionId);
+  await chrome.tabs.reload(tab.id);
+  return await waitForTabUrl(tab.id, () => true, 15000);
+}
+
+export async function back(tabId, sessionId, timeout = 10000) {
+  const tab = await getTargetTab(tabId, sessionId);
+  const startUrl = tab.url || '';
+
+  const { ok, error, restricted } = await safeExecuteScript(
+    tab.id,
+    () => {
+      history.back();
+      return { success: true };
+    }
+  );
+
+  if (!ok) return { success: false, error, restricted };
+  return await waitForTabUrl(tab.id, (url) => url !== startUrl, timeout);
+}
+
+export async function forward(tabId, sessionId, timeout = 10000) {
+  const tab = await getTargetTab(tabId, sessionId);
+  const startUrl = tab.url || '';
+
+  const { ok, error, restricted } = await safeExecuteScript(
+    tab.id,
+    () => {
+      history.forward();
+      return { success: true };
+    }
+  );
+
+  if (!ok) return { success: false, error, restricted };
+  return await waitForTabUrl(tab.id, (url) => url !== startUrl, timeout);
+}
+
+export async function waitForUrl(expected, match = 'includes', timeout = 10000, tabId, sessionId) {
+  const tab = await getTargetTab(tabId, sessionId);
+
+  const predicate = (url) => {
+    if (match === 'equals') return url === expected;
+    if (match === 'regex') {
+      try {
+        return new RegExp(expected).test(url);
+      } catch {
+        return false;
+      }
+    }
+    return url.includes(expected);
+  };
+
+  const result = await waitForTabUrl(tab.id, predicate, timeout);
+  return {
+    ...result,
+    expected,
+    match,
+  };
+}
+
+export async function waitForText(text, timeout = 10000, tabId, sessionId) {
+  const tab = await getTargetTab(tabId, sessionId);
+
+  if (isRestrictedUrl(tab.url)) {
+    return { success: false, error: 'Cannot wait for text on restricted page', restricted: true };
+  }
+
+  const startTime = Date.now();
+  while (Date.now() - startTime < timeout) {
+    const { ok, result, error, restricted } = await safeExecuteScript(
+      tab.id,
+      (needle) => {
+        const bodyText = document.body?.innerText || '';
+        return { found: bodyText.includes(needle) };
+      },
+      [text]
+    );
+
+    if (!ok) return { success: false, error, restricted };
+    if (result.found) {
+      return { success: true, found: true, text };
+    }
+
+    await new Promise((r) => setTimeout(r, 100));
+  }
+
+  return { success: false, found: false, text, error: 'Timeout' };
+}
+
+export async function waitForRequest(
+  url,
+  match = 'includes',
+  method = null,
+  status = null,
+  timeout = 15000,
+  reload = false,
+  tabId,
+  sessionId
+) {
+  const tab = await getTargetTab(tabId, sessionId);
+
+  if (isRestrictedUrl(tab.url)) {
+    return { success: false, error: 'Cannot wait for network requests on restricted page', restricted: true };
+  }
+
+  return await watchNetwork(tab.id, {
+    reload,
+    timeout,
+    predicate: (observer) => {
+      const entries = Array.from(observer.requestMap.values()).sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+      const matchEntry = entries.find((entry) => matchesNetworkEntry(entry, { url, match, method, status }));
+
+      if (matchEntry) {
+        const completeEnough = status === null || status === undefined
+          ? Boolean(matchEntry.finished || matchEntry.failed || matchEntry.status)
+          : Number(matchEntry.status) === Number(status);
+
+        if (completeEnough) {
+          return {
+            done: true,
+            value: {
+              success: true,
+              request: matchEntry,
+              tabId: tab.id,
+            },
+          };
+        }
+      }
+
+      return { done: false };
+    },
+  });
+}
+
+export async function waitForNetworkIdle(idleTime = 1000, timeout = 15000, reload = false, tabId, sessionId) {
+  const tab = await getTargetTab(tabId, sessionId);
+
+  if (isRestrictedUrl(tab.url)) {
+    return { success: false, error: 'Cannot wait for network idle on restricted page', restricted: true };
+  }
+
+  const clampedIdle = Math.min(Math.max(idleTime, 100), 10000);
+
+  return await watchNetwork(tab.id, {
+    reload,
+    timeout,
+    predicate: (observer) => {
+      const quietFor = Date.now() - observer.lastNetworkActivityAt;
+      if (observer.activeRequests.size === 0 && quietFor >= clampedIdle) {
+        return {
+          done: true,
+          value: {
+            success: true,
+            idleTime: clampedIdle,
+            observedRequests: Array.from(observer.requestMap.values()).slice(-20),
+            tabId: tab.id,
+          },
+        };
+      }
+
+      return { done: false };
+    },
+  });
 }
 
 // Execute JavaScript code (uses debugger to bypass CSP)
@@ -766,37 +2402,80 @@ export async function executeScript(code, tabId, sessionId) {
   }
 
   try {
-    // Attach debugger temporarily
-    await chrome.debugger.attach({ tabId: tab.id }, '1.3');
-    await chrome.debugger.sendCommand({ tabId: tab.id }, 'Runtime.enable');
+    const dbg = await acquireDebugger(tab.id);
+    try {
+      await dbg.send('Runtime.enable');
 
     // Wrap user code so the result is always JSON-serializable (avoids "Value is unserializable").
     // The wrapper runs user code inside a function (so `return` works), then coerces
     // the result to a serializable form: primitives pass through, objects are JSON-cloned,
     // and non-serializable values (DOM nodes, functions, etc.) fall back to String().
-    const wrappedCode = `(function() {
-  var __r = (function() { ${code} })();
-  if (__r === null || __r === undefined || typeof __r === 'number' || typeof __r === 'string' || typeof __r === 'boolean') return __r;
-  try { return JSON.parse(JSON.stringify(__r)); } catch(e) { return String(__r); }
+    const wrappedCode = `(async function() {
+  const __serialize = (value) => {
+    if (value === null || value === undefined) return value;
+    if (typeof value === 'number' || typeof value === 'string' || typeof value === 'boolean') return value;
+    try { return JSON.parse(JSON.stringify(value)); } catch (e) { return String(value); }
+  };
+  const __r = await (async function() { ${code} })();
+  return __serialize(__r);
 })()`;
 
-    const result = await chrome.debugger.sendCommand({ tabId: tab.id }, 'Runtime.evaluate', {
-      expression: wrappedCode,
-      returnByValue: true,
-    });
+      const result = await dbg.send('Runtime.evaluate', {
+        expression: wrappedCode,
+        returnByValue: true,
+        awaitPromise: true,
+      });
 
-    // Detach debugger
-    await chrome.debugger.detach({ tabId: tab.id });
+      if (result.exceptionDetails) {
+        return { success: false, error: result.exceptionDetails.text || 'Script error' };
+      }
 
-    if (result.exceptionDetails) {
-      return { success: false, error: result.exceptionDetails.text || 'Script error' };
+      return { success: true, result: result.result?.value };
+    } catch (e) {
+      return { success: false, error: e.message };
+    } finally {
+      releaseDebugger(tab.id);
+    }
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+export async function waitForFunction(expression, timeout = 10000, interval = 200, tabId, sessionId) {
+  const tab = await getTargetTab(tabId, sessionId);
+  const clampedTimeout = Math.min(Math.max(timeout, 500), 60000);
+  const clampedInterval = Math.min(Math.max(interval, 50), 5000);
+  const startedAt = Date.now();
+
+  const dbg = await acquireDebugger(tab.id);
+  try {
+    while (Date.now() - startedAt < clampedTimeout) {
+      const result = await dbg.send('Runtime.evaluate', {
+        expression: `!!(${expression})`,
+        returnByValue: true,
+        awaitPromise: true,
+        userGesture: false,
+      });
+
+      if (result?.result?.value === true) {
+        return {
+          success: true,
+          elapsed: Date.now() - startedAt,
+          tabId: tab.id,
+        };
+      }
+
+      await new Promise((r) => setTimeout(r, clampedInterval));
     }
 
-    return { success: true, result: result.result?.value };
-  } catch (e) {
-    // Try to detach on error
-    try { await chrome.debugger.detach({ tabId: tab.id }); } catch {}
-    return { success: false, error: e.message };
+    return {
+      success: false,
+      error: 'Timeout',
+      elapsed: Date.now() - startedAt,
+      tabId: tab.id,
+    };
+  } finally {
+    releaseDebugger(tab.id);
   }
 }
 
@@ -897,126 +2576,426 @@ export async function recordStart(tabId, sessionId, maxDuration = 30000, execute
   activeRecordings.set(targetTabId, recording);
 
   try {
-    // Attach debugger (shows yellow banner)
-    await chrome.debugger.attach({ tabId: targetTabId }, '1.3');
+    const dbg = await acquireDebugger(targetTabId);
+    try {
+      // Enable Page and Runtime domains
+      await dbg.send('Page.enable');
+      await dbg.send('Runtime.enable');
 
-    // Enable Page and Runtime domains
-    await chrome.debugger.sendCommand({ tabId: targetTabId }, 'Page.enable');
-    await chrome.debugger.sendCommand({ tabId: targetTabId }, 'Runtime.enable');
-
-    // Capture screenshot every 100ms (~10 fps)
-    const captureFrame = async () => {
-      if (recording.stopped) return;
-      try {
-        const result = await chrome.debugger.sendCommand({ tabId: targetTabId }, 'Page.captureScreenshot', {
-          format: 'jpeg',
-          quality: 80,
-        });
-        if (result?.data) {
-          recording.frames.push({
-            data: result.data,
-            timestamp: Date.now() - recording.startTime,
+      // Capture screenshot every 100ms (~10 fps)
+      const captureFrame = async () => {
+        if (recording.stopped) return;
+        try {
+          const result = await dbg.send('Page.captureScreenshot', {
+            format: 'jpeg',
+            quality: 80,
           });
+          if (result?.data) {
+            recording.frames.push({
+              data: result.data,
+              timestamp: Date.now() - recording.startTime,
+            });
+          }
+        } catch (e) {
+          console.warn(`[Helm] Frame capture error: ${e.message}`);
+        }
+      };
+
+      // Start capture loop
+      recording.captureInterval = setInterval(captureFrame, 100);
+      await captureFrame(); // First frame immediately
+
+      // Execute code and record
+      console.log(`[Helm] Recording with execute for tab ${targetTabId}`);
+
+      let executeResult = null;
+      let executeError = null;
+
+      try {
+        // Wrap code in async IIFE for await support
+        const wrappedCode = `(async () => { ${execute} })()`;
+
+        // Execute the code via debugger (same session, no extra attach)
+        const result = await dbg.send('Runtime.evaluate', {
+          expression: wrappedCode,
+          returnByValue: true,
+          awaitPromise: true, // Wait for async code
+        });
+
+        if (result.exceptionDetails) {
+          executeError = result.exceptionDetails.text || 'Script error';
+        } else {
+          executeResult = result.result?.value;
         }
       } catch (e) {
-        console.warn(`[Helm] Frame capture error: ${e.message}`);
+        executeError = e.message;
       }
-    };
+    
+      // Small delay to capture final state
+      await new Promise(r => setTimeout(r, 200));
+      await captureFrame(); // Capture final frame
 
-    // Start capture loop
-    recording.captureInterval = setInterval(captureFrame, 100);
-    await captureFrame(); // First frame immediately
+      // Stop recording
+      recording.stopped = true;
+      recording.stoppedAt = Date.now();
 
-    // Execute code and record
-    console.log(`[Helm] Recording with execute for tab ${targetTabId}`);
-
-    let executeResult = null;
-    let executeError = null;
-
-    try {
-      // Wrap code in async IIFE for await support
-      const wrappedCode = `(async () => { ${execute} })()`;
-
-      // Execute the code via debugger (same session, no extra attach)
-      const result = await chrome.debugger.sendCommand({ tabId: targetTabId }, 'Runtime.evaluate', {
-        expression: wrappedCode,
-        returnByValue: true,
-        awaitPromise: true, // Wait for async code
-      });
-
-      if (result.exceptionDetails) {
-        executeError = result.exceptionDetails.text || 'Script error';
-      } else {
-        executeResult = result.result?.value;
+      if (recording.captureInterval) {
+        clearInterval(recording.captureInterval);
       }
+
+      const frames = recording.frames;
+      const recordingDuration = recording.stoppedAt - recording.startTime;
+
+      console.log(`[Helm] Recording complete: ${frames.length} frames in ${recordingDuration}ms`);
+
+      return {
+        success: true,
+        tabId: targetTabId,
+        frameCount: frames.length,
+        duration: recordingDuration,
+        fps: frames.length > 0 ? Math.round(frames.length / (recordingDuration / 1000)) : 0,
+        frames,
+        executeResult,
+        executeError,
+      };
     } catch (e) {
-      executeError = e.message;
+      return { success: false, error: `Failed to record: ${e.message}` };
+    } finally {
+      releaseDebugger(targetTabId);
     }
-
-    // Small delay to capture final state
-    await new Promise(r => setTimeout(r, 200));
-    await captureFrame(); // Capture final frame
-
-    // Stop recording
-    recording.stopped = true;
-    recording.stoppedAt = Date.now();
-
-    if (recording.captureInterval) {
-      clearInterval(recording.captureInterval);
-    }
-
-    // Detach debugger
-    try {
-      await chrome.debugger.detach({ tabId: targetTabId });
-    } catch (e) {
-      console.warn(`[Helm] Debugger cleanup error: ${e.message}`);
-    }
-
-    const frames = recording.frames;
-    const recordingDuration = recording.stoppedAt - recording.startTime;
-    activeRecordings.delete(targetTabId);
-
-    console.log(`[Helm] Recording complete: ${frames.length} frames in ${recordingDuration}ms`);
-
-    return {
-      success: true,
-      tabId: targetTabId,
-      frameCount: frames.length,
-      duration: recordingDuration,
-      fps: frames.length > 0 ? Math.round(frames.length / (recordingDuration / 1000)) : 0,
-      frames,
-      executeResult,
-      executeError,
-    };
   } catch (e) {
-    activeRecordings.delete(targetTabId);
     return { success: false, error: `Failed to record: ${e.message}` };
+  } finally {
+    activeRecordings.delete(targetTabId);
+  }
+}
+
+function serializeDownloadItem(item) {
+  return {
+    id: item.id,
+    url: item.url,
+    finalUrl: item.finalUrl,
+    filename: item.filename,
+    mime: item.mime,
+    fileSize: item.fileSize,
+    bytesReceived: item.bytesReceived,
+    totalBytes: item.totalBytes,
+    state: item.state,
+    danger: item.danger,
+    exists: item.exists,
+    error: item.error,
+    startTime: item.startTime,
+    endTime: item.endTime,
+  };
+}
+
+export async function waitForDownload(timeout = 15000, filenameContains = null) {
+  const startedAt = Date.now();
+  const normalizedFilter = filenameContains ? String(filenameContains).toLowerCase() : null;
+  const initialItems = await chrome.downloads.search({ limit: 100 });
+  const baselineIds = new Set(initialItems.map((item) => item.id));
+
+  const hasMatchingName = (item) => {
+    if (!item) return false;
+    if (!normalizedFilter) return true;
+
+    const haystack = `${item.filename || ''} ${item.finalUrl || ''} ${item.url || ''}`.toLowerCase();
+    return haystack.includes(normalizedFilter);
+  };
+
+  const isFreshItem = (item) => {
+    if (!item) return false;
+    if (!baselineIds.has(item.id)) return true;
+
+    const itemStartedAt = item.startTime ? new Date(item.startTime).getTime() : 0;
+    return Boolean(itemStartedAt && itemStartedAt + 1000 >= startedAt);
+  };
+
+  const matchesFilter = (item) => hasMatchingName(item) && isFreshItem(item);
+
+  const findMatchingDownload = async () => {
+    const items = await chrome.downloads.search({ limit: 100 });
+    return items
+      .filter(matchesFilter)
+      .sort((a, b) => {
+        const aTime = a.startTime ? new Date(a.startTime).getTime() : 0;
+        const bTime = b.startTime ? new Date(b.startTime).getTime() : 0;
+        return bTime - aTime;
+      })[0] || null;
+  };
+
+  return await new Promise((resolve) => {
+    let settled = false;
+    let activeDownloadId = null;
+
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearInterval(poller);
+      chrome.downloads.onCreated.removeListener(onCreated);
+      chrome.downloads.onChanged.removeListener(onChanged);
+      resolve(result);
+    };
+
+    const inspectDownload = async (downloadId) => {
+      const [item] = await chrome.downloads.search({ id: downloadId });
+      if (!item || !matchesFilter(item)) return;
+
+      activeDownloadId = item.id;
+      if (item.state === 'complete') {
+        finish({ success: true, download: serializeDownloadItem(item) });
+        return;
+      }
+
+      if (item.state === 'interrupted') {
+        finish({
+          success: false,
+          error: `Download interrupted${item.error ? `: ${item.error}` : ''}`,
+          download: serializeDownloadItem(item),
+        });
+      }
+    };
+
+    const onCreated = (item) => {
+      if (!matchesFilter(item)) return;
+      activeDownloadId = item.id;
+      void inspectDownload(item.id);
+    };
+
+    const onChanged = (delta) => {
+      if (activeDownloadId !== null && delta.id !== activeDownloadId) return;
+      void inspectDownload(delta.id);
+    };
+
+    chrome.downloads.onCreated.addListener(onCreated);
+    chrome.downloads.onChanged.addListener(onChanged);
+
+    const timer = setTimeout(() => {
+      void chrome.downloads.search({ limit: 10, orderBy: ['-startTime'] }).then((items) => {
+        finish({
+          success: false,
+          error: 'Timeout',
+          filenameContains,
+          recentDownloads: items.map(serializeDownloadItem),
+        });
+      }).catch((error) => {
+        finish({
+          success: false,
+          error: 'Timeout',
+          filenameContains,
+          debugError: error?.message || String(error),
+        });
+      });
+    }, Math.min(Math.max(timeout, 1000), 120000));
+
+    const poller = setInterval(() => {
+      void findMatchingDownload().then((item) => {
+        if (item) {
+          void inspectDownload(item.id);
+        }
+      });
+    }, 250);
+
+    void findMatchingDownload().then((item) => {
+      if (item) {
+        void inspectDownload(item.id);
+      }
+    });
+  });
+}
+
+async function waitForDownloadById(downloadId, timeout = 15000) {
+  return await new Promise((resolve) => {
+    let settled = false;
+
+    const finish = async (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      chrome.downloads.onChanged.removeListener(onChanged);
+      resolve(result);
+    };
+
+    const inspect = async () => {
+      const [item] = await chrome.downloads.search({ id: downloadId });
+      if (!item) {
+        await finish({ success: false, error: 'Download not found', downloadId });
+        return;
+      }
+
+      if (item.state === 'complete') {
+        await finish({ success: true, download: serializeDownloadItem(item) });
+        return;
+      }
+
+      if (item.state === 'interrupted') {
+        await finish({
+          success: false,
+          error: `Download interrupted${item.error ? `: ${item.error}` : ''}`,
+          download: serializeDownloadItem(item),
+        });
+      }
+    };
+
+    const onChanged = (delta) => {
+      if (delta.id !== downloadId) return;
+      void inspect();
+    };
+
+    const timer = setTimeout(async () => {
+      const [item] = await chrome.downloads.search({ id: downloadId });
+      await finish({
+        success: false,
+        error: 'Timeout',
+        download: item ? serializeDownloadItem(item) : null,
+        downloadId,
+      });
+    }, Math.min(Math.max(timeout, 1000), 120000));
+
+    chrome.downloads.onChanged.addListener(onChanged);
+    void inspect();
+  });
+}
+
+export async function downloadUrl(url, filename = null, saveAs = false, wait = true, timeout = 15000) {
+  const options = {
+    url,
+    saveAs: Boolean(saveAs),
+    conflictAction: 'uniquify',
+  };
+
+  if (filename) {
+    options.filename = filename;
+  }
+
+  try {
+    const downloadId = await chrome.downloads.download(options);
+
+    if (!wait) {
+      return {
+        success: true,
+        downloadId,
+        url,
+        filename: filename || null,
+        saveAs: Boolean(saveAs),
+      };
+    }
+
+    const result = await waitForDownloadById(downloadId, timeout);
+    return {
+      ...result,
+      downloadId,
+      url,
+      filename: filename || null,
+      saveAs: Boolean(saveAs),
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error?.message || String(error),
+      url,
+      filename: filename || null,
+      saveAs: Boolean(saveAs),
+    };
   }
 }
 
 // Handle debugger events (screencast frames)
 export function handleDebuggerEvent(source, method, params) {
+  const tabId = source.tabId;
+  const observer = activeObservers.get(tabId);
+
+  if (observer) {
+    if (method === 'Runtime.consoleAPICalled') {
+      observer.consoleEntries.push({
+        type: 'console',
+        level: params.type,
+        text: (params.args || []).map(serializeRemoteObject).filter((v) => v !== null).join(' '),
+        timestamp: params.timestamp,
+      });
+    } else if (method === 'Runtime.exceptionThrown') {
+      observer.consoleEntries.push({
+        type: 'exception',
+        level: 'error',
+        text: params.exceptionDetails?.text || params.exceptionDetails?.exception?.description || 'Unhandled exception',
+        timestamp: params.timestamp || Date.now(),
+      });
+    } else if (method === 'Log.entryAdded') {
+      observer.consoleEntries.push({
+        type: 'log',
+        level: params.entry?.level || 'info',
+        text: params.entry?.text || '',
+        source: params.entry?.source,
+        timestamp: params.entry?.timestamp || Date.now(),
+        url: params.entry?.url,
+      });
+    } else if (method === 'Network.requestWillBeSent') {
+      observer.lastNetworkActivityAt = Date.now();
+      observer.activeRequests?.add(params.requestId);
+      observer.requestMap.set(params.requestId, {
+        requestId: params.requestId,
+        url: params.request?.url,
+        method: params.request?.method,
+        resourceType: params.type,
+        startedAt: params.timestamp,
+      });
+    } else if (method === 'Network.responseReceived') {
+      observer.lastNetworkActivityAt = Date.now();
+      const entry = observer.requestMap.get(params.requestId) || { requestId: params.requestId };
+      observer.requestMap.set(params.requestId, {
+        ...entry,
+        url: entry.url || params.response?.url,
+        resourceType: entry.resourceType || params.type,
+        status: params.response?.status,
+        statusText: params.response?.statusText,
+        mimeType: params.response?.mimeType,
+        protocol: params.response?.protocol,
+      });
+    } else if (method === 'Network.loadingFailed') {
+      observer.lastNetworkActivityAt = Date.now();
+      observer.activeRequests?.delete(params.requestId);
+      const entry = observer.requestMap.get(params.requestId) || { requestId: params.requestId };
+      observer.requestMap.set(params.requestId, {
+        ...entry,
+        failed: true,
+        errorText: params.errorText,
+        canceled: params.canceled,
+      });
+    } else if (method === 'Network.loadingFinished') {
+      observer.lastNetworkActivityAt = Date.now();
+      observer.activeRequests?.delete(params.requestId);
+      const entry = observer.requestMap.get(params.requestId) || { requestId: params.requestId };
+      observer.requestMap.set(params.requestId, {
+        ...entry,
+        finished: true,
+        encodedDataLength: params.encodedDataLength,
+      });
+    }
+
+    if (observer.consoleEntries.length > 200) {
+      observer.consoleEntries = observer.consoleEntries.slice(-200);
+    }
+  }
+
   if (method !== 'Page.screencastFrame') {
     return;
   }
 
-  const tabId = source.tabId;
   const recording = activeRecordings.get(tabId);
   if (!recording) {
     console.log(`[Helm] Frame received but no recording for tab ${tabId}`);
     return;
   }
 
-  // Store frame
   recording.frames.push({
-    data: params.data, // Base64 JPEG
+    data: params.data,
     timestamp: Date.now() - recording.startTime,
     metadata: params.metadata,
   });
 
   console.log(`[Helm] Frame ${recording.frames.length} captured for tab ${tabId}`);
 
-  // Acknowledge frame to continue receiving (MUST be done to get next frame)
   chrome.debugger.sendCommand({ tabId }, 'Page.screencastFrameAck', {
     sessionId: params.sessionId,
   }).then(() => {
@@ -1025,4 +3004,3 @@ export function handleDebuggerEvent(source, method, params) {
     console.error(`[Helm] Frame ack failed: ${e.message}`);
   });
 }
-

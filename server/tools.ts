@@ -2,7 +2,8 @@
 
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import sharp from "sharp";
-import { writeFile } from "fs/promises";
+import { writeFile, mkdir, rm } from "fs/promises";
+import { execSync } from "child_process";
 
 const SCREENSHOT_DEBUG_PATH = "/tmp/browser-screenshot-latest.jpg";
 import { MAX_SCREENSHOT_DIMENSION, WS_PORT, PROTOCOL_VERSION } from "./config.js";
@@ -31,6 +32,38 @@ export const tools: Tool[] = [
     },
   },
   {
+    name: "browser_back",
+    description: "Go back in browser history",
+    inputSchema: {
+      type: "object",
+      properties: {
+        timeout: { type: "number", description: "Optional timeout while waiting for the URL to change (default 10000)" },
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
+    },
+  },
+  {
+    name: "browser_forward",
+    description: "Go forward in browser history",
+    inputSchema: {
+      type: "object",
+      properties: {
+        timeout: { type: "number", description: "Optional timeout while waiting for the URL to change (default 10000)" },
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
+    },
+  },
+  {
+    name: "browser_reload",
+    description: "Reload the current tab",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
+    },
+  },
+  {
     name: "browser_screenshot",
     description: "Take a screenshot of the current page or a specific element",
     inputSchema: {
@@ -38,6 +71,7 @@ export const tools: Tool[] = [
       properties: {
         tabId: { type: "number", description: "Optional: specific tab to capture" },
         selector: { type: "string", description: "Optional: CSS selector to capture specific element" },
+        fullPage: { type: "boolean", description: "Capture the entire scrollable page, not just the viewport (max height 16384px)" },
       },
     },
   },
@@ -52,6 +86,62 @@ export const tools: Tool[] = [
         tabId: { type: "number", description: "Optional: specific tab" },
       },
       required: ["selector"],
+    },
+  },
+  {
+    name: "browser_get_content",
+    description: "Get the current page title, URL, HTML, and visible text content",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
+    },
+  },
+  {
+    name: "browser_get_interactables",
+    description: "List visible interactive elements on the page with text and bounds",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: { type: "number", description: "Maximum number of interactable elements to return (default 100, max 200)" },
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
+    },
+  },
+  {
+    name: "browser_get_semantic_snapshot",
+    description: "Get a semantic summary of the page including landmarks, headings, forms, and key interactive elements",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: { type: "number", description: "Maximum items to include per section (default 20, max 50)" },
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
+    },
+  },
+  {
+    name: "browser_get_console_logs",
+    description: "Collect console logs and page exceptions for a short duration. Optionally reload the page first.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        duration: { type: "number", description: "Collection duration in milliseconds (default 1000, max 10000)" },
+        reload: { type: "boolean", description: "Reload the page before collecting logs" },
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
+    },
+  },
+  {
+    name: "browser_get_network_requests",
+    description: "Collect network requests for a short duration. Optionally reload the page first.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        duration: { type: "number", description: "Collection duration in milliseconds (default 1000, max 10000)" },
+        reload: { type: "boolean", description: "Reload the page before collecting requests" },
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
     },
   },
   {
@@ -107,6 +197,32 @@ export const tools: Tool[] = [
       type: "object",
       properties: {
         selector: { type: "string", description: "CSS selector for the element" },
+        verify: { type: "boolean", description: "Optional: verify that the click changed page state" },
+        verifyTimeout: { type: "number", description: "Optional: verification wait in milliseconds" },
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
+      required: ["selector"],
+    },
+  },
+  {
+    name: "browser_right_click",
+    description: "Right-click an element on the page using CSS selector",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selector: { type: "string", description: "CSS selector for the element" },
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
+      required: ["selector"],
+    },
+  },
+  {
+    name: "browser_double_click",
+    description: "Double-click an element on the page using CSS selector",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selector: { type: "string", description: "CSS selector for the element" },
         tabId: { type: "number", description: "Optional: specific tab" },
       },
       required: ["selector"],
@@ -120,6 +236,8 @@ export const tools: Tool[] = [
       properties: {
         selector: { type: "string", description: "CSS selector for the input" },
         text: { type: "string", description: "Text to type" },
+        verify: { type: "boolean", description: "Optional: verify that the typed text appears in the target element" },
+        verifyTimeout: { type: "number", description: "Optional: verification wait in milliseconds" },
         tabId: { type: "number", description: "Optional: specific tab" },
       },
       required: ["selector", "text"],
@@ -187,9 +305,174 @@ export const tools: Tool[] = [
       properties: {
         key: { type: "string", description: "Key to press: Enter, Tab, Escape, Backspace, ArrowUp, ArrowDown, ArrowLeft, ArrowRight" },
         selector: { type: "string", description: "Optional: CSS selector to focus before pressing key" },
+        verify: { type: "boolean", description: "Optional: verify that the key press changed page state" },
+        verifyTimeout: { type: "number", description: "Optional: verification wait in milliseconds" },
         tabId: { type: "number", description: "Optional: specific tab" },
       },
       required: ["key"],
+    },
+  },
+  {
+    name: "browser_press_keys",
+    description: "Press a key chord such as Control+A or Shift+Tab",
+    inputSchema: {
+      type: "object",
+      properties: {
+        keys: {
+          type: "array",
+          items: { type: "string" },
+          description: "Ordered key chord, e.g. [\"Control\", \"a\"] or [\"Shift\", \"Tab\"]",
+        },
+        selector: { type: "string", description: "Optional: CSS selector to focus before pressing keys" },
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
+      required: ["keys"],
+    },
+  },
+  {
+    name: "browser_select",
+    description: "Select an option in a dropdown by value or visible text",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selector: { type: "string", description: "CSS selector for the select element" },
+        value: { type: "string", description: "Option value attribute or visible text" },
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
+      required: ["selector", "value"],
+    },
+  },
+  {
+    name: "browser_drag_and_drop",
+    description: "Drag one element onto another using a synthetic HTML5 drag-and-drop sequence",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sourceSelector: { type: "string", description: "CSS selector for the draggable source element" },
+        targetSelector: { type: "string", description: "CSS selector for the drop target element" },
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
+      required: ["sourceSelector", "targetSelector"],
+    },
+  },
+  {
+    name: "browser_upload_file",
+    description: "Set one or more local files on an <input type=file> element using absolute file paths",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selector: { type: "string", description: "CSS selector for the file input element" },
+        path: { type: "string", description: "Absolute path to a single local file" },
+        paths: {
+          type: "array",
+          description: "Absolute paths to multiple local files",
+          items: { type: "string" },
+        },
+        verify: { type: "boolean", description: "Optional: verify that the file input now contains the selected files" },
+        verifyTimeout: { type: "number", description: "Optional: verification wait in milliseconds" },
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
+      required: ["selector"],
+      anyOf: [
+        { required: ["path"] },
+        { required: ["paths"] },
+      ],
+    },
+  },
+  {
+    name: "browser_wait_for_download",
+    description: "Wait for a browser download to start and complete",
+    inputSchema: {
+      type: "object",
+      properties: {
+        timeout: { type: "number", description: "Timeout in milliseconds (default 15000)" },
+        filenameContains: { type: "string", description: "Optional substring filter for the downloaded filename" },
+      },
+    },
+  },
+  {
+    name: "browser_download_url",
+    description: "Download a URL directly via the Chrome downloads API, bypassing page clicks when possible",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "The file URL to download" },
+        filename: { type: "string", description: "Optional target filename relative to the browser Downloads folder" },
+        saveAs: { type: "boolean", description: "Whether to show the Save As dialog (default false)" },
+        wait: { type: "boolean", description: "Wait for the download to complete before returning (default true)" },
+        timeout: { type: "number", description: "Timeout in milliseconds when wait=true (default 15000)" },
+      },
+      required: ["url"],
+    },
+  },
+  {
+    name: "browser_wait",
+    description: "Wait for an element to appear on the page",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selector: { type: "string", description: "CSS selector to wait for" },
+        timeout: { type: "number", description: "Timeout in milliseconds (default 10000)" },
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
+      required: ["selector"],
+    },
+  },
+  {
+    name: "browser_wait_for_url",
+    description: "Wait for the current tab URL to match a value",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "URL fragment, exact URL, or regex pattern to wait for" },
+        match: { type: "string", enum: ["includes", "equals", "regex"], description: "How to compare URLs (default: includes)" },
+        timeout: { type: "number", description: "Timeout in milliseconds (default 10000)" },
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
+      required: ["url"],
+    },
+  },
+  {
+    name: "browser_wait_for_text",
+    description: "Wait for visible page text to contain a string",
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "Text to wait for" },
+        timeout: { type: "number", description: "Timeout in milliseconds (default 10000)" },
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
+      required: ["text"],
+    },
+  },
+  {
+    name: "browser_wait_for_request",
+    description: "Wait for a network request matching a URL filter, with optional method and status filters",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "URL fragment, exact URL, or regex pattern to wait for" },
+        match: { type: "string", enum: ["includes", "equals", "regex"], description: "How to compare URLs (default: includes)" },
+        method: { type: "string", description: "Optional HTTP method filter (GET, POST, etc.)" },
+        status: { type: "number", description: "Optional expected response status code" },
+        timeout: { type: "number", description: "Timeout in milliseconds (default 15000)" },
+        reload: { type: "boolean", description: "Reload the page before waiting" },
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
+      required: ["url"],
+    },
+  },
+  {
+    name: "browser_wait_for_network_idle",
+    description: "Wait until the page has no in-flight network requests for a given idle period",
+    inputSchema: {
+      type: "object",
+      properties: {
+        idleTime: { type: "number", description: "Required quiet period in milliseconds (default 1000)" },
+        timeout: { type: "number", description: "Timeout in milliseconds (default 15000)" },
+        reload: { type: "boolean", description: "Reload the page before waiting" },
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
     },
   },
   {
@@ -211,6 +494,18 @@ export const tools: Tool[] = [
     },
   },
   {
+    name: "browser_record",
+    description: "Record browser tab as video. Optionally execute JavaScript code during recording. Uses Chrome Debugger API and returns a video file path after capture completes.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        execute: { type: "string", description: "Optional JavaScript code to execute during recording. Supports async/await." },
+        duration: { type: "string", enum: ["5s", "10s", "15s"], description: "Max recording duration (default: 10s)" },
+        tabId: { type: "number", description: "Optional: specific tab to record" },
+      },
+    },
+  },
+  {
     name: "browser_get_cookies",
     description: "Get cookies for a URL (includes HttpOnly cookies via chrome.cookies API)",
     inputSchema: {
@@ -218,6 +513,36 @@ export const tools: Tool[] = [
       properties: {
         url: { type: "string", description: "URL to get cookies for (e.g. https://grok.com)" },
         name: { type: "string", description: "Optional: specific cookie name to filter" },
+      },
+    },
+  },
+  {
+    name: "browser_set_cookie",
+    description: "Set a cookie for a URL",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "URL to scope the cookie to" },
+        name: { type: "string", description: "Cookie name" },
+        value: { type: "string", description: "Cookie value" },
+        domain: { type: "string", description: "Optional cookie domain" },
+        path: { type: "string", description: "Optional cookie path" },
+        secure: { type: "boolean", description: "Optional secure flag" },
+        httpOnly: { type: "boolean", description: "Optional HttpOnly flag" },
+        expirationDate: { type: "number", description: "Optional expiration time as seconds since epoch" },
+        sameSite: { type: "string", description: "Optional SameSite value" },
+      },
+      required: ["url", "name", "value"],
+    },
+  },
+  {
+    name: "browser_clear_cookies",
+    description: "Clear one cookie by name or all cookies for a URL",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "URL to clear cookies for" },
+        name: { type: "string", description: "Optional cookie name to remove a single cookie" },
       },
     },
   },
@@ -233,11 +558,33 @@ export const tools: Tool[] = [
       required: ["code"],
     },
   },
+  {
+    name: "browser_wait_for_function",
+    description: "Wait until a JavaScript expression returns truthy (polls at interval)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        expression: { type: "string", description: "JavaScript expression to evaluate" },
+        timeout: { type: "number", description: "Max wait time in ms (default 10000, max 60000)" },
+        interval: { type: "number", description: "Poll interval in ms (default 200)" },
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
+      required: ["expression"],
+    },
+  },
 ];
 
 // Tool name to command mapping
 const toolToCommand: Record<string, string> = {
   browser_navigate: "navigate",
+  browser_back: "back",
+  browser_forward: "forward",
+  browser_reload: "reload",
+  browser_get_content: "get_content",
+  browser_get_interactables: "get_interactables",
+  browser_get_semantic_snapshot: "get_semantic_snapshot",
+  browser_get_console_logs: "get_console_logs",
+  browser_get_network_requests: "get_network_requests",
   browser_get_element_text: "get_element_text",
   browser_get_url: "get_url",
   browser_get_tabs: "get_tabs",
@@ -245,14 +592,31 @@ const toolToCommand: Record<string, string> = {
   browser_new_tab: "new_tab",
   browser_close_tab: "close_tab",
   browser_click: "click",
+  browser_right_click: "right_click",
+  browser_double_click: "double_click",
   browser_type: "type",
   browser_hover: "hover",
   browser_scroll: "scroll",
   browser_click_at: "click_at",
   browser_find_text: "find_text",
   browser_press_key: "press_key",
+  browser_press_keys: "press_keys",
+  browser_select: "select",
+  browser_wait_for_function: "wait_for_function",
+  browser_drag_and_drop: "drag_and_drop",
+  browser_upload_file: "upload_file",
+  browser_wait_for_download: "wait_for_download",
+  browser_download_url: "download_url",
+  browser_wait: "wait",
+  browser_wait_for_url: "wait_for_url",
+  browser_wait_for_text: "wait_for_text",
+  browser_wait_for_request: "wait_for_request",
+  browser_wait_for_network_idle: "wait_for_network_idle",
   browser_paste: "paste",
+  browser_record: "record_start",
   browser_get_cookies: "get_cookies",
+  browser_set_cookie: "set_cookie",
+  browser_clear_cookies: "clear_cookies",
   browser_execute: "execute",
 };
 
@@ -321,9 +685,11 @@ export async function handleToolCall(
     if (name === "browser_screenshot") {
       const command = "screenshot";
       const selector = typedArgs.selector as string | undefined;
+      const fullPage = typedArgs.fullPage as boolean | undefined;
       const result = (await sendCommand(mySessionId || "", command, {
         tabId,
         selector,
+        fullPage,
       })) as { image: string; error?: string };
 
       if (result?.error && !result?.image) {
@@ -358,6 +724,99 @@ export async function handleToolCall(
         };
       }
       return { content: [{ type: "text", text: "Screenshot failed" }], isError: true };
+    }
+
+    if (name === "browser_record") {
+      const durationMap: Record<string, number> = { "5s": 5000, "10s": 10000, "15s": 15000 };
+      const maxDuration = durationMap[typedArgs.duration as string] || 10000;
+
+      const result = (await sendCommand(mySessionId || "", "record_start", {
+        tabId,
+        maxDuration,
+        execute: typedArgs.execute ?? null,
+      })) as {
+        success: boolean;
+        error?: string;
+        frames?: Array<{ data: string; timestamp: number }>;
+        duration?: number;
+        fps?: number;
+        executeResult?: unknown;
+        executeError?: string;
+      };
+
+      if (!result?.success) {
+        return {
+          content: [{ type: "text", text: result?.error || "Recording failed" }],
+          isError: true,
+        };
+      }
+
+      const frames = result.frames || [];
+      if (frames.length === 0) {
+        return {
+          content: [{ type: "text", text: "No frames captured" }],
+          isError: true,
+        };
+      }
+
+      const timestamp = Date.now();
+      const tempDir = `/tmp/helm-recording-${timestamp}`;
+      const outputPath = `/tmp/helm-recording-${timestamp}.webm`;
+
+      try {
+        await mkdir(tempDir, { recursive: true });
+
+        for (let i = 0; i < frames.length; i++) {
+          const frameBuffer = Buffer.from(frames[i].data, "base64");
+          const framePath = `${tempDir}/frame_${String(i).padStart(5, "0")}.jpg`;
+          await writeFile(framePath, frameBuffer);
+        }
+
+        const fps = result.fps && result.fps > 0 ? result.fps : 10;
+        execSync(
+          `ffmpeg -y -framerate ${fps} -i "${tempDir}/frame_%05d.jpg" -c:v libvpx-vp9 -b:v 1M -pix_fmt yuv420p "${outputPath}" 2>/dev/null`,
+          { timeout: 30000 }
+        );
+
+        await rm(tempDir, { recursive: true, force: true });
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  success: true,
+                  videoPath: outputPath,
+                  frameCount: frames.length,
+                  duration: result.duration,
+                  fps,
+                  executeResult: result.executeResult,
+                  executeError: result.executeError,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (ffmpegError) {
+        try {
+          await rm(tempDir, { recursive: true, force: true });
+        } catch {
+          // Ignore cleanup errors
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `FFmpeg error: ${ffmpegError instanceof Error ? ffmpegError.message : String(ffmpegError)}. Make sure ffmpeg is installed.`,
+            },
+          ],
+          isError: true,
+        };
+      }
     }
 
     // Generic command handler

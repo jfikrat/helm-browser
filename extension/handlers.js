@@ -7,6 +7,7 @@ import {
   tabRouting,
   setTabRouting,
   setProtocolVersion,
+  cleanupDebuggerSession,
 } from './state.js';
 import { sendMessage } from './websocket.js';
 import {
@@ -17,21 +18,41 @@ import {
 import { getTabs, switchTab, newTab, closeTab } from './tabs.js';
 import {
   navigate,
+  back,
+  forward,
+  reload,
   screenshot,
   getContent,
+  getInteractables,
+  getSemanticSnapshot,
+  getConsoleLogs,
+  getNetworkRequests,
   getElementText,
   getUrl,
   click,
   type,
+  uploadFile,
   hover,
   scroll,
   waitForElement,
+  waitForUrl,
+  waitForText,
   clickAt,
   findText,
   pressKey,
+  dragAndDrop,
+  waitForDownload,
+  downloadUrl,
+  waitForRequest,
+  waitForNetworkIdle,
   executeScript,
+  waitForFunction,
   paste,
   recordStart,
+  rightClick,
+  doubleClick,
+  pressKeys,
+  selectOption,
   handleDebuggerEvent,
 } from './commands.js';
 
@@ -43,6 +64,14 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 // Track debugger detach reasons
 chrome.debugger.onDetach.addListener((source, reason) => {
   console.warn(`[Helm] Debugger detached from tab ${source.tabId}, reason: ${reason}`);
+  if (source?.tabId !== undefined) {
+    cleanupDebuggerSession(source.tabId);
+  }
+});
+
+// Clean up persistent debugger state when a tab closes
+chrome.tabs.onRemoved.addListener((tabId) => {
+  cleanupDebuggerSession(tabId);
 });
 
 // Handle incoming server message
@@ -169,6 +198,91 @@ async function handleLegacyCommand(message) {
   }
 }
 
+function buildCookieRemovalUrl(cookie, fallbackUrl) {
+  try {
+    const parsedFallback = fallbackUrl ? new URL(fallbackUrl) : null;
+    const protocol = cookie.secure ? 'https:' : (parsedFallback?.protocol || 'http:');
+    const host = String(cookie.domain || parsedFallback?.hostname || '')
+      .replace(/^\./, '');
+    const path = cookie.path || '/';
+    return `${protocol}//${host}${path}`;
+  } catch {
+    return fallbackUrl;
+  }
+}
+
+function normalizeSameSite(value) {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  const normalized = String(value).trim().toLowerCase();
+  if (normalized === 'lax') return 'lax';
+  if (normalized === 'strict') return 'strict';
+  if (normalized === 'none' || normalized === 'no_restriction') return 'no_restriction';
+  if (normalized === 'unspecified') return 'unspecified';
+  return value;
+}
+
+async function setCookie(params) {
+  const { url, name, value, domain, path, secure, httpOnly, expirationDate, sameSite } = params;
+  if (!url || !name) {
+    throw new Error('url and name are required to set a cookie');
+  }
+
+  const cookie = await chrome.cookies.set({
+    url,
+    name,
+    value: String(value ?? ''),
+    ...(domain !== undefined ? { domain } : {}),
+    ...(path !== undefined ? { path } : {}),
+    ...(secure !== undefined ? { secure: Boolean(secure) } : {}),
+    ...(httpOnly !== undefined ? { httpOnly: Boolean(httpOnly) } : {}),
+    ...(expirationDate !== undefined ? { expirationDate: Number(expirationDate) } : {}),
+    ...(sameSite !== undefined ? { sameSite: normalizeSameSite(sameSite) } : {}),
+  });
+
+  return { success: true, cookie };
+}
+
+async function clearCookies(params) {
+  const { url, name } = params;
+  if (!url) {
+    throw new Error('url is required to clear cookies');
+  }
+
+  if (name) {
+    const result = await chrome.cookies.remove({ url, name });
+    return {
+      success: true,
+      removedCount: result ? 1 : 0,
+      removed: result ? [{ url, name }] : [],
+    };
+  }
+
+  const cookies = await chrome.cookies.getAll({ url });
+  let removedCount = 0;
+  const removed = [];
+
+  for (const cookie of cookies) {
+    const removalUrl = buildCookieRemovalUrl(cookie, url);
+    const result = await chrome.cookies.remove({
+      url: removalUrl,
+      name: cookie.name,
+    });
+
+    if (result) {
+      removedCount += 1;
+      removed.push({
+        url: removalUrl,
+        name: cookie.name,
+      });
+    }
+  }
+
+  return { success: true, removedCount, removed };
+}
+
 // Main command router
 async function handleCommand(command, params) {
   switch (command) {
@@ -183,10 +297,24 @@ async function handleCommand(command, params) {
     // Navigation
     case 'navigate':
       return await navigate(params.url, params.tabId, params.sessionId);
+    case 'back':
+      return await back(params.tabId, params.sessionId, params.timeout);
+    case 'forward':
+      return await forward(params.tabId, params.sessionId, params.timeout);
+    case 'reload':
+      return await reload(params.tabId, params.sessionId);
     case 'screenshot':
-      return await screenshot(params.tabId, params.sessionId, params.selector);
+      return await screenshot(params.tabId, params.sessionId, params.selector, params.fullPage);
     case 'get_content':
       return await getContent(params.tabId, params.sessionId);
+    case 'get_interactables':
+      return await getInteractables(params.tabId, params.sessionId, params.limit);
+    case 'get_semantic_snapshot':
+      return await getSemanticSnapshot(params.tabId, params.sessionId, params.limit);
+    case 'get_console_logs':
+      return await getConsoleLogs(params.tabId, params.sessionId, params.duration, params.reload);
+    case 'get_network_requests':
+      return await getNetworkRequests(params.tabId, params.sessionId, params.duration, params.reload);
     case 'get_element_text':
       return await getElementText(params.selector, params.tabId, params.sessionId, params.index);
     case 'get_url':
@@ -204,13 +332,34 @@ async function handleCommand(command, params) {
 
     // Interactions
     case 'click':
-      return await click(params.selector, params.tabId, params.sessionId);
+      return await click(
+        params.selector,
+        params.tabId,
+        params.sessionId,
+        params.verify,
+        params.verifyTimeout
+      );
+    case 'right_click':
+      return await rightClick(params.selector, params.tabId, params.sessionId);
+    case 'double_click':
+      return await doubleClick(params.selector, params.tabId, params.sessionId);
     case 'type':
       return await type(
         params.selector,
         params.text,
         params.tabId,
-        params.sessionId
+        params.sessionId,
+        params.verify,
+        params.verifyTimeout
+      );
+    case 'upload_file':
+      return await uploadFile(
+        params.selector,
+        params.paths ?? params.path,
+        params.tabId,
+        params.sessionId,
+        params.verify,
+        params.verifyTimeout
       );
     case 'hover':
       return await hover(params.selector, params.tabId, params.sessionId);
@@ -225,6 +374,21 @@ async function handleCommand(command, params) {
     case 'wait':
       return await waitForElement(
         params.selector,
+        params.timeout,
+        params.tabId,
+        params.sessionId
+      );
+    case 'wait_for_url':
+      return await waitForUrl(
+        params.url,
+        params.match,
+        params.timeout,
+        params.tabId,
+        params.sessionId
+      );
+    case 'wait_for_text':
+      return await waitForText(
+        params.text,
         params.timeout,
         params.tabId,
         params.sessionId
@@ -244,7 +408,49 @@ async function handleCommand(command, params) {
 
     // Keyboard
     case 'press_key':
-      return await pressKey(params.key, params.selector, params.tabId, params.sessionId);
+      return await pressKey(
+        params.key,
+        params.selector,
+        params.tabId,
+        params.sessionId,
+        params.verify,
+        params.verifyTimeout
+      );
+    case 'press_keys':
+      return await pressKeys(params.keys, params.selector, params.tabId, params.sessionId);
+    case 'select':
+      return await selectOption(params.selector, params.value, params.tabId, params.sessionId);
+    case 'drag_and_drop':
+      return await dragAndDrop(params.sourceSelector, params.targetSelector, params.tabId, params.sessionId);
+    case 'wait_for_download':
+      return await waitForDownload(params.timeout, params.filenameContains);
+    case 'download_url':
+      return await downloadUrl(
+        params.url,
+        params.filename,
+        params.saveAs,
+        params.wait,
+        params.timeout
+      );
+    case 'wait_for_request':
+      return await waitForRequest(
+        params.url,
+        params.match,
+        params.method,
+        params.status,
+        params.timeout,
+        params.reload,
+        params.tabId,
+        params.sessionId
+      );
+    case 'wait_for_network_idle':
+      return await waitForNetworkIdle(
+        params.idleTime,
+        params.timeout,
+        params.reload,
+        params.tabId,
+        params.sessionId
+      );
 
     // Clipboard
     case 'paste':
@@ -253,6 +459,8 @@ async function handleCommand(command, params) {
     // Scripting
     case 'execute':
       return await executeScript(params.code, params.tabId, params.sessionId);
+    case 'wait_for_function':
+      return await waitForFunction(params.expression, params.timeout, params.interval, params.tabId, params.sessionId);
 
     // Recording
     case 'record_start':
@@ -261,6 +469,10 @@ async function handleCommand(command, params) {
     // Cookies
     case 'get_cookies':
       return await getCookies(params.url, params.name);
+    case 'set_cookie':
+      return await setCookie(params);
+    case 'clear_cookies':
+      return await clearCookies(params);
 
     // Misc
     case 'ping':

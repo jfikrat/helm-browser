@@ -19,6 +19,29 @@ export const sessionWindows = new Map();
 // Recording state: tabId -> { frames, startTime, maxDuration, timer }
 export const activeRecordings = new Map();
 
+// Debug observer state: tabId -> { consoleEntries, networkEntries, requestMap, startedAt }
+export const activeObservers = new Map();
+
+// Persistent debugger session state: tabId -> { attached, refCount, detachTimer, attachPromise }
+export const debuggerSessions = new Map();
+
+export function cleanupDebuggerSession(tabId) {
+  const session = debuggerSessions.get(tabId);
+  if (!session) {
+    return;
+  }
+
+  if (session.detachTimer) {
+    clearTimeout(session.detachTimer);
+    session.detachTimer = null;
+  }
+
+  session.attached = false;
+  session.refCount = 0;
+  session.attachPromise = null;
+  debuggerSessions.delete(tabId);
+}
+
 // Persist sessionWindows to chrome.storage.local
 export async function saveSessionWindows() {
   const data = Object.fromEntries(sessionWindows);
