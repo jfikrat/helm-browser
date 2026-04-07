@@ -31,13 +31,14 @@ function isRestrictedUrl(url) {
 }
 
 // Safe executeScript wrapper - catches error page exceptions and edge cases
-async function safeExecuteScript(tabId, func, args = [], frameId = null) {
+async function safeExecuteScript(tabId, func, args = [], frameId = null, world = 'ISOLATED') {
   try {
     const target = frameId ? { tabId, frameIds: [frameId] } : { tabId };
     const results = await chrome.scripting.executeScript({
       target,
       func,
       args,
+      world,
     });
 
     // Handle empty/missing results
@@ -2444,6 +2445,8 @@ export async function selectOption(selector, value, tabId, sessionId, locator = 
       }
 
       element.value = matchedOption.value;
+      // Use MAIN world (ensured by caller) so that inline onchange handlers
+      // and framework event listeners (React, Vue, etc.) fire correctly.
       element.dispatchEvent(new Event('input', { bubbles: true }));
       element.dispatchEvent(new Event('change', { bubbles: true }));
 
@@ -2454,7 +2457,9 @@ export async function selectOption(selector, value, tabId, sessionId, locator = 
         selectedText: matchedOption.textContent?.trim() || '',
       };
     },
-    [selector, value]
+    [selector, value],
+    null,   // frameId
+    'MAIN'  // world — required for events to reach inline/framework handlers
   );
 
   if (!ok) return { success: false, error, restricted };
