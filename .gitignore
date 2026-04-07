@@ -34,3 +34,7 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+# Agent scratch directories
+.firecrawl/
+.squad/
