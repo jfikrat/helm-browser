@@ -212,7 +212,7 @@ export async function resetViewport(tabId, sessionId) {
     await dbg.send('Emulation.setUserAgentOverride', { userAgent: '' });
     await dbg.send('Emulation.setTouchEmulationEnabled', {
       enabled: false,
-      maxTouchPoints: 0,
+      maxTouchPoints: 1,
     });
     return { success: true };
   } catch (error) {
