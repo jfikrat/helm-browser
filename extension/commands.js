@@ -1972,7 +1972,7 @@ export async function clickAt(x, y, tabId, sessionId, verify = false, verifyTime
 export async function findText(
   text,
   shouldClick = false,
-  filter = {},
+  _filter = {},
   tabId,
   sessionId
 ) {
@@ -2060,9 +2060,7 @@ export async function pressKey(key, selector = null, tabId, sessionId, verify = 
     if (!resolved.ok) return { success: false, error: resolved.error, restricted: resolved.restricted };
     selector = resolved.selector;
   }
-  if (!selector) {
-    return { success: false, error: 'selector or locator is required', restricted: false };
-  }
+  // selector is optional for pressKey — falls back to document.activeElement
 
   const { ok, result, error, restricted } = await safeExecuteScript(
     tab.id,
