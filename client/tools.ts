@@ -59,7 +59,7 @@ export const tools: Tool[] = [
   },
   {
     name: "browser_screenshot",
-    description: "Take a screenshot of the current page or a specific element",
+    description: "Take a screenshot of the current page or a specific element. Prefer text-based reads first; use only when visual verification or layout matters.",
     inputSchema: {
       type: "object",
       properties: {
@@ -111,7 +111,7 @@ export const tools: Tool[] = [
   },
   {
     name: "browser_get_element_text",
-    description: "Get text content of a specific element (bypasses CSP, much smaller than full page)",
+    description: "Get text content of a specific element (bypasses CSP, much smaller than full page). Lightweight read; prefer this for extracting specific content.",
     inputSchema: {
       type: "object",
       properties: {
@@ -125,7 +125,7 @@ export const tools: Tool[] = [
   },
   {
     name: "browser_get_content",
-    description: "Get the current page title, URL, HTML, and visible text content",
+    description: "Get the current page title, URL, HTML, and visible text content. Heavy read because it includes full HTML; use lighter tools first when possible.",
     inputSchema: {
       type: "object",
       properties: {
@@ -135,7 +135,7 @@ export const tools: Tool[] = [
   },
   {
     name: "browser_get_interactables",
-    description: "List visible interactive elements on the page with text and bounds",
+    description: "List visible interactive elements on the page with text and bounds. Lightweight target list; prefer this over full snapshot when you only need clickable or typeable elements.",
     inputSchema: {
       type: "object",
       properties: {
@@ -146,7 +146,7 @@ export const tools: Tool[] = [
   },
   {
     name: "browser_get_semantic_snapshot",
-    description: "Get a semantic summary of the page including landmarks, headings, forms, and key interactive elements",
+    description: "Get a semantic summary of the page including landmarks, headings, forms, and key interactive elements. Compact summary that is lighter than a full interactive snapshot.",
     inputSchema: {
       type: "object",
       properties: {
@@ -508,7 +508,7 @@ export const tools: Tool[] = [
   },
   {
     name: "browser_get_snapshot",
-    description: "Get all interactive elements on the page with stable refs. Use refs with the locator parameter to target elements reliably across DOM changes.",
+    description: "Get all interactive elements on the page with stable refs. Full interactive map; for follow-up reads prefer incremental=true with sinceVersion to reduce token cost.",
     inputSchema: {
       type: "object",
       properties: {
