@@ -331,7 +331,14 @@ async function handleCommand(command, params) {
     case 'get_network_requests':
       return await getNetworkRequests(params.tabId, params.sessionId, params.duration, params.reload);
     case 'get_element_text':
-      return await getElementText(params.selector, params.tabId, params.sessionId, params.index, params.locator);
+      return await getElementText(
+        params.selector,
+        params.tabId,
+        params.sessionId,
+        params.index,
+        params.locator,
+        params.visibleOnly
+      );
     case 'get_url':
       return await getUrl(params.tabId, params.sessionId);
     case 'get_snapshot':

@@ -1065,7 +1065,8 @@ export async function runSequenceStep(tabId, sessionId, step, defaultTimeout = 1
         tabId,
         sessionId,
         step.index ?? null,
-        step.locator ?? null
+        step.locator ?? null,
+        step.visibleOnly
       );
     default:
       return { success: false, error: `Unsupported step type: ${step.type}` };
@@ -1110,6 +1111,25 @@ export async function sequence(steps, tabId, sessionId, stopOnError = true, defa
         },
       ],
       stoppedAt: 25,
+      ...state,
+      elapsedMs: Date.now() - startedAt,
+    };
+  }
+
+  if (steps.length === 0) {
+    const state = await getTabSummary(targetTabId);
+    return {
+      success: false,
+      results: [
+        {
+          index: 0,
+          type: 'validation',
+          success: false,
+          elapsedMs: 0,
+          result: { success: false, error: 'steps must not be empty' },
+        },
+      ],
+      stoppedAt: 0,
       ...state,
       elapsedMs: Date.now() - startedAt,
     };
@@ -1789,7 +1809,7 @@ export async function getNetworkRequests(tabId, sessionId, duration = 1000, relo
 
 // Get element text content (bypasses CSP, no eval)
 // index: null = first match, -1 = last match, 0+ = specific index
-export async function getElementText(selector, tabId, sessionId, index = null, locator = null) {
+export async function getElementText(selector, tabId, sessionId, index = null, locator = null, visibleOnly = true) {
   const tab = await getTargetTab(tabId, sessionId);
 
   if (isRestrictedUrl(tab.url)) {
@@ -1807,10 +1827,27 @@ export async function getElementText(selector, tabId, sessionId, index = null, l
 
   const { ok, result, error, restricted } = await safeExecuteScript(
     tab.id,
-    (sel, idx) => {
-      const elements = document.querySelectorAll(sel);
-      if (elements.length === 0) {
+    (sel, idx, shouldFilterVisible) => {
+      const allElements = Array.from(document.querySelectorAll(sel));
+      if (allElements.length === 0) {
         return { error: `Element not found: ${sel}` };
+      }
+
+      const isVisible = (element) => {
+        const style = window.getComputedStyle(element);
+        if (element.hidden === true) return false;
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        if (element.offsetWidth === 0 && element.offsetHeight === 0) return false;
+        return true;
+      };
+
+      const elements = shouldFilterVisible ? allElements.filter(isVisible) : allElements;
+      if (elements.length === 0) {
+        return {
+          error: shouldFilterVisible
+            ? `No visible elements found for: ${sel}`
+            : `Element not found: ${sel}`,
+        };
       }
 
       let element;
@@ -1829,12 +1866,14 @@ export async function getElementText(selector, tabId, sessionId, index = null, l
         selector: sel,
         index: idx === -1 ? elements.length - 1 : (idx ?? 0),
         totalMatches: elements.length,
+        totalDomMatches: allElements.length,
+        visibleOnly: shouldFilterVisible,
         text: element.innerText,
         tagName: element.tagName,
         className: element.className,
       };
     },
-    [selector, index]
+    [selector, index, visibleOnly]
   );
 
   if (!ok) return { error, restricted };

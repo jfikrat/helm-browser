@@ -118,6 +118,7 @@ export const tools: Tool[] = [
         selector: { type: "string", description: "CSS selector for the element" },
         locator: { type: "object", description: "Semantic locator (alternative to selector). Properties: role, name, text, label, placeholder, testId, ref" },
         index: { type: "number", description: "Element index: null=first, -1=last, 0+=specific index" },
+        visibleOnly: { type: "boolean", description: "Ignore hidden matches and return the first visible element (default true)" },
         tabId: { type: "number", description: "Optional: specific tab" },
       },
     },
