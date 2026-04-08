@@ -63,6 +63,9 @@ import {
   handleDebuggerEvent,
   getDebugStatus,
   getSnapshot,
+  clickAndWait,
+  typeAndWait,
+  submitAndWait,
 } from './commands.js';
 
 // Set up debugger event listener for screencast frames
@@ -355,6 +358,15 @@ async function handleCommand(command, params) {
         params.verifyTimeout,
         params.locator
       );
+    case 'click_and_wait':
+      return await clickAndWait(
+        params.selector,
+        params.waitFor,
+        params.timeout,
+        params.tabId,
+        params.sessionId,
+        params.locator
+      );
     case 'right_click':
       return await rightClick(params.selector, params.tabId, params.sessionId, params.locator);
     case 'double_click':
@@ -368,6 +380,18 @@ async function handleCommand(command, params) {
         params.verify,
         params.verifyTimeout,
         params.locator
+      );
+    case 'type_and_wait':
+      return await typeAndWait(
+        params.selector,
+        params.text,
+        params.waitFor,
+        params.timeout,
+        params.tabId,
+        params.sessionId,
+        params.locator,
+        params.verify,
+        params.verifyTimeout
       );
     case 'upload_file':
       return await uploadFile(
@@ -417,6 +441,15 @@ async function handleCommand(command, params) {
       return await waitForDialog(params.timeout, params.tabId, params.sessionId);
     case 'handle_dialog':
       return await handleDialog(params.accept, params.promptText, params.tabId, params.sessionId);
+    case 'submit_and_wait':
+      return await submitAndWait(
+        params.selector,
+        params.waitFor,
+        params.timeout,
+        params.tabId,
+        params.sessionId,
+        params.locator
+      );
     case 'emulate_device':
       return await emulateDevice(params.device, params.tabId, params.sessionId);
     case 'reset_viewport':

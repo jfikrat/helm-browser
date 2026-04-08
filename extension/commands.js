@@ -743,6 +743,211 @@ async function waitForTabUrl(tabId, predicate, timeout = 10000) {
   };
 }
 
+async function watchNetworkInternal(tabId, {
+  reload = false,
+  timeout = 15000,
+  predicate,
+}) {
+  const key = Symbol('watchNetwork');
+  const observer = {
+    tabId,
+    consoleEntries: [],
+    networkEntries: [],
+    requestMap: new Map(),
+    activeRequests: new Set(),
+    startedAt: Date.now(),
+    lastNetworkActivityAt: Date.now(),
+  };
+
+  activeObservers.set(key, observer);
+
+  try {
+    const dbg = await acquireDebugger(tabId);
+    try {
+      await dbg.send('Network.enable');
+
+      if (reload) {
+        await dbg.send('Page.enable');
+        await dbg.send('Page.reload', { ignoreCache: false });
+      }
+
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < Math.min(Math.max(timeout, 1000), 120000)) {
+        const decision = predicate(observer);
+        if (decision?.done) {
+          return decision.value;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+
+      return {
+        success: false,
+        error: 'Timeout',
+        observedRequests: Array.from(observer.requestMap.values()).slice(-20),
+      };
+    } finally {
+      releaseDebugger(tabId);
+    }
+  } finally {
+    activeObservers.delete(key);
+  }
+}
+
+async function waitForFunctionWithDebugger(dbg, expression, timeout = 10000, interval = 200, tabId) {
+  const clampedTimeout = Math.min(Math.max(timeout, 500), 60000);
+  const clampedInterval = Math.min(Math.max(interval, 50), 5000);
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < clampedTimeout) {
+    const result = await dbg.send('Runtime.evaluate', {
+      expression: `!!(${expression})`,
+      returnByValue: true,
+      awaitPromise: true,
+      userGesture: false,
+    });
+
+    if (result?.result?.value === true) {
+      return {
+        success: true,
+        elapsed: Date.now() - startedAt,
+        tabId,
+      };
+    }
+
+    await new Promise((r) => setTimeout(r, clampedInterval));
+  }
+
+  return {
+    success: false,
+    error: 'Timeout',
+    elapsed: Date.now() - startedAt,
+    tabId,
+  };
+}
+
+function isWaitTimeoutResult(result) {
+  return result?.success === false && result?.error === 'Timeout';
+}
+
+async function getTabSummary(tabId) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    return {
+      url: tab.url,
+      title: tab.title,
+    };
+  } catch {
+    return {
+      url: null,
+      title: null,
+    };
+  }
+}
+
+async function waitForCompositeCondition(waitFor, timeout, tabId, sessionId) {
+  if (!waitFor || typeof waitFor !== 'object') {
+    return { success: false, error: 'waitFor is required' };
+  }
+
+  const waitType = String(waitFor.type || '').trim();
+  const waitTimeout = Math.min(Math.max(timeout ?? 10000, 500), 120000);
+
+  if (waitType === 'url') {
+    const expected = typeof waitFor.value === 'string' ? waitFor.value : '';
+    if (!expected) {
+      return { success: false, error: 'waitFor.value is required for url waits' };
+    }
+    return await waitForUrl(expected, waitFor.match || 'includes', waitTimeout, tabId, sessionId);
+  }
+
+  if (waitType === 'selector') {
+    const selector = typeof waitFor.value === 'string' ? waitFor.value : '';
+    if (!selector) {
+      return { success: false, error: 'waitFor.value is required for selector waits' };
+    }
+    return await waitForElement(selector, waitTimeout, tabId, sessionId);
+  }
+
+  if (waitType === 'networkIdle') {
+    const idleTime = Math.min(Math.max(waitFor.timeout ?? 1000, 100), 10000);
+    return await watchNetworkInternal(tabId, {
+      timeout: waitTimeout,
+      predicate: (observer) => {
+        const quietFor = Date.now() - observer.lastNetworkActivityAt;
+        if (observer.activeRequests.size === 0 && quietFor >= idleTime) {
+          return {
+            done: true,
+            value: {
+              success: true,
+              idleTime,
+              observedRequests: Array.from(observer.requestMap.values()).slice(-20),
+              tabId,
+            },
+          };
+        }
+
+        return { done: false };
+      },
+    });
+  }
+
+  if (waitType === 'function') {
+    const expression = typeof waitFor.value === 'string' ? waitFor.value : '';
+    if (!expression) {
+      return { success: false, error: 'waitFor.value is required for function waits' };
+    }
+
+    const dbg = await acquireDebugger(tabId);
+    try {
+      return await waitForFunctionWithDebugger(dbg, expression, waitTimeout, 200, tabId);
+    } finally {
+      releaseDebugger(tabId);
+    }
+  }
+
+  return { success: false, error: `Unsupported waitFor type: ${waitType}` };
+}
+
+async function runCompositeAction(tabId, action, waitFor, timeout, sessionId) {
+  const startedAt = Date.now();
+
+  return await withTabMutex(tabId, async () => {
+    let actionResult;
+    try {
+      actionResult = await action();
+    } catch (error) {
+      actionResult = {
+        success: false,
+        error: error?.message || String(error),
+      };
+    }
+
+    let waitResult = null;
+    let waitTimedOut = false;
+
+    if (waitFor && actionResult?.success !== false) {
+      try {
+        waitResult = await waitForCompositeCondition(waitFor, timeout, tabId, sessionId);
+        waitTimedOut = isWaitTimeoutResult(waitResult);
+      } catch (error) {
+        waitResult = {
+          success: false,
+          error: error?.message || String(error),
+        };
+      }
+    }
+
+    const state = await getTabSummary(tabId);
+    return {
+      actionResult,
+      waitResult,
+      ...state,
+      elapsedMs: Date.now() - startedAt,
+      ...(waitTimedOut ? { waitTimedOut: true } : {}),
+    };
+  });
+}
+
 function serializeRemoteObject(arg) {
   if (arg?.value !== undefined) return arg.value;
   if (arg?.unserializableValue !== undefined) return arg.unserializableValue;
@@ -776,51 +981,11 @@ async function watchNetwork(tabId, {
   timeout = 15000,
   predicate,
 }) {
-  return await withTabMutex(tabId, async () => {
-    const key = Symbol('watchNetwork');
-    const observer = {
-      tabId,
-      consoleEntries: [],
-      networkEntries: [],
-      requestMap: new Map(),
-      activeRequests: new Set(),
-      startedAt: Date.now(),
-      lastNetworkActivityAt: Date.now(),
-    };
-
-    activeObservers.set(key, observer);
-
-    try {
-      const dbg = await acquireDebugger(tabId);
-      try {
-        await dbg.send('Network.enable');
-
-        if (reload) {
-          await dbg.send('Page.enable');
-          await dbg.send('Page.reload', { ignoreCache: false });
-        }
-
-        const startedAt = Date.now();
-        while (Date.now() - startedAt < Math.min(Math.max(timeout, 1000), 120000)) {
-          const decision = predicate(observer);
-          if (decision?.done) {
-            return decision.value;
-          }
-          await new Promise((resolve) => setTimeout(resolve, 100));
-        }
-
-        return {
-          success: false,
-          error: 'Timeout',
-          observedRequests: Array.from(observer.requestMap.values()).slice(-20),
-        };
-      } finally {
-        releaseDebugger(tabId);
-      }
-    } finally {
-      activeObservers.delete(key);
-    }
-  });
+  return await withTabMutex(tabId, async () => watchNetworkInternal(tabId, {
+    reload,
+    timeout,
+    predicate,
+  }));
 }
 
 async function collectDebugEvents(tabId, {
@@ -2926,6 +3091,90 @@ export async function reload(tabId, sessionId) {
   return await waitForTabUrl(tab.id, () => true, 15000);
 }
 
+export async function submit(selector = null, tabId, sessionId, locator = null) {
+  const tab = await getTargetTab(tabId, sessionId);
+
+  if (isRestrictedUrl(tab.url)) {
+    return { success: false, error: 'Cannot submit forms on restricted page', restricted: true };
+  }
+
+  if (!selector && locator) {
+    const resolved = await resolveLocator(tab.id, locator);
+    if (!resolved.ok) return { success: false, error: resolved.error, restricted: resolved.restricted };
+    selector = resolved.selector;
+  }
+
+  const { ok, result, error, restricted } = await safeExecuteScript(
+    tab.id,
+    (sel) => {
+      const target = sel ? document.querySelector(sel) : document.activeElement;
+      if (!target) {
+        return { success: false, error: sel ? `Element not found: ${sel}` : 'No focused element' };
+      }
+
+      if (target !== document.body) {
+        target.scrollIntoView?.({ block: 'center', inline: 'center', behavior: 'instant' });
+        target.focus?.();
+      }
+
+      const form =
+        target.tagName === 'FORM'
+          ? target
+          : target.form || target.closest?.('form') || null;
+
+      if (!form) {
+        return { success: false, error: 'No form found for target element' };
+      }
+
+      let submitter = null;
+      if (target.matches?.('button, input[type="submit"]')) {
+        submitter = target;
+      } else {
+        submitter =
+          form.querySelector('button[type="submit"], input[type="submit"]') ||
+          form.querySelector('button:not([type]), button');
+      }
+
+      if (submitter && typeof submitter.click === 'function') {
+        submitter.click();
+        return {
+          success: true,
+          selector: sel,
+          submitted: true,
+          method: 'click',
+          formAction: form.getAttribute('action') || form.action || '',
+        };
+      }
+
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+        return {
+          success: true,
+          selector: sel,
+          submitted: true,
+          method: 'requestSubmit',
+          formAction: form.getAttribute('action') || form.action || '',
+        };
+      }
+
+      form.submit();
+      return {
+        success: true,
+        selector: sel,
+        submitted: true,
+        method: 'submit',
+        formAction: form.getAttribute('action') || form.action || '',
+      };
+    },
+    [selector],
+    null,
+    'MAIN'
+  );
+
+  if (!ok) return { success: false, error, restricted };
+  return result;
+}
+
 export async function back(tabId, sessionId, timeout = 10000) {
   const tab = await getTargetTab(tabId, sessionId);
   const startUrl = tab.url || '';
@@ -2963,6 +3212,7 @@ export async function waitForUrl(expected, match = 'includes', timeout = 10000, 
 
   const predicate = (url) => {
     if (match === 'equals') return url === expected;
+    if (match === 'startsWith') return url.startsWith(expected);
     if (match === 'regex') {
       try {
         return new RegExp(expected).test(url);
@@ -3134,42 +3384,48 @@ export async function executeScript(code, tabId, sessionId) {
 
 export async function waitForFunction(expression, timeout = 10000, interval = 200, tabId, sessionId) {
   const tab = await getTargetTab(tabId, sessionId);
-  const clampedTimeout = Math.min(Math.max(timeout, 500), 60000);
-  const clampedInterval = Math.min(Math.max(interval, 50), 5000);
-  const startedAt = Date.now();
 
   return await withTabMutex(tab.id, async () => {
     const dbg = await acquireDebugger(tab.id);
     try {
-      while (Date.now() - startedAt < clampedTimeout) {
-        const result = await dbg.send('Runtime.evaluate', {
-          expression: `!!(${expression})`,
-          returnByValue: true,
-          awaitPromise: true,
-          userGesture: false,
-        });
-
-        if (result?.result?.value === true) {
-          return {
-            success: true,
-            elapsed: Date.now() - startedAt,
-            tabId: tab.id,
-          };
-        }
-
-        await new Promise((r) => setTimeout(r, clampedInterval));
-      }
-
-      return {
-        success: false,
-        error: 'Timeout',
-        elapsed: Date.now() - startedAt,
-        tabId: tab.id,
-      };
+      return await waitForFunctionWithDebugger(dbg, expression, timeout, interval, tab.id);
     } finally {
       releaseDebugger(tab.id);
     }
   });
+}
+
+export async function clickAndWait(selector, waitFor, timeout = 10000, tabId, sessionId, locator = null) {
+  const tab = await getTargetTab(tabId, sessionId);
+  return await runCompositeAction(
+    tab.id,
+    () => click(selector, tab.id, sessionId, false, 150, locator),
+    waitFor,
+    timeout,
+    sessionId
+  );
+}
+
+export async function typeAndWait(selector, text, waitFor, timeout = 10000, tabId, sessionId, locator = null, verify = false, verifyTimeout = 1000) {
+  const tab = await getTargetTab(tabId, sessionId);
+  return await runCompositeAction(
+    tab.id,
+    () => type(selector, text, tab.id, sessionId, verify, verifyTimeout, locator),
+    waitFor,
+    timeout,
+    sessionId
+  );
+}
+
+export async function submitAndWait(selector = null, waitFor, timeout = 10000, tabId, sessionId, locator = null) {
+  const tab = await getTargetTab(tabId, sessionId);
+  return await runCompositeAction(
+    tab.id,
+    () => submit(selector, tab.id, sessionId, locator),
+    waitFor,
+    timeout,
+    sessionId
+  );
 }
 
 // Paste text into focused element (direct insertion, no clipboard API)
