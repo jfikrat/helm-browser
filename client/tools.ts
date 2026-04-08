@@ -239,6 +239,31 @@ export const tools: Tool[] = [
     },
   },
   {
+    name: "browser_click_and_wait",
+    description: "Click an element on the page, then wait for a URL change, selector, network idle, or JavaScript function result",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selector: { type: "string", description: "CSS selector for the element" },
+        locator: { type: "object", description: "Semantic locator (alternative to selector). Properties: role, name, text, label, placeholder, testId, ref" },
+        waitFor: {
+          type: "object",
+          description: "Wait condition after the click",
+          properties: {
+            type: { type: "string", enum: ["url", "selector", "networkIdle", "function"] },
+            value: { type: "string", description: "URL fragment, selector, or JavaScript expression depending on wait type" },
+            match: { type: "string", enum: ["includes", "equals", "startsWith"], description: "URL match mode when waitFor.type is url" },
+            timeout: { type: "number", description: "Optional timeout for network idle waits in milliseconds" },
+          },
+          required: ["type"],
+        },
+        timeout: { type: "number", description: "Optional timeout in milliseconds for the wait condition" },
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
+      required: ["selector", "waitFor"],
+    },
+  },
+  {
     name: "browser_right_click",
     description: "Right-click an element on the page using CSS selector",
     inputSchema: {
@@ -276,6 +301,34 @@ export const tools: Tool[] = [
         tabId: { type: "number", description: "Optional: specific tab" },
       },
       required: ["text"],
+    },
+  },
+  {
+    name: "browser_type_and_wait",
+    description: "Type text into an input element, then wait for a URL change, selector, network idle, or JavaScript function result",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selector: { type: "string", description: "CSS selector for the input" },
+        locator: { type: "object", description: "Semantic locator (alternative to selector). Properties: role, name, text, label, placeholder, testId, ref" },
+        text: { type: "string", description: "Text to type" },
+        waitFor: {
+          type: "object",
+          description: "Wait condition after typing",
+          properties: {
+            type: { type: "string", enum: ["url", "selector", "networkIdle", "function"] },
+            value: { type: "string", description: "URL fragment, selector, or JavaScript expression depending on wait type" },
+            match: { type: "string", enum: ["includes", "equals", "startsWith"], description: "URL match mode when waitFor.type is url" },
+            timeout: { type: "number", description: "Optional timeout for network idle waits in milliseconds" },
+          },
+          required: ["type"],
+        },
+        timeout: { type: "number", description: "Optional timeout in milliseconds for the wait condition" },
+        verify: { type: "boolean", description: "Optional: verify that the typed text appears in the target element" },
+        verifyTimeout: { type: "number", description: "Optional: verification wait in milliseconds" },
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
+      required: ["text", "selector", "waitFor"],
     },
   },
   {
@@ -363,6 +416,31 @@ export const tools: Tool[] = [
         tabId: { type: "number", description: "Optional: specific tab" },
       },
       required: ["keys"],
+    },
+  },
+  {
+    name: "browser_submit_and_wait",
+    description: "Submit a form or focused element, then wait for a URL change, selector, network idle, or JavaScript function result",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selector: { type: "string", description: "Optional: CSS selector for the form or submit control" },
+        locator: { type: "object", description: "Semantic locator (alternative to selector). Properties: role, name, text, label, placeholder, testId, ref" },
+        waitFor: {
+          type: "object",
+          description: "Wait condition after the submit",
+          properties: {
+            type: { type: "string", enum: ["url", "selector", "networkIdle", "function"] },
+            value: { type: "string", description: "URL fragment, selector, or JavaScript expression depending on wait type" },
+            match: { type: "string", enum: ["includes", "equals", "startsWith"], description: "URL match mode when waitFor.type is url" },
+            timeout: { type: "number", description: "Optional timeout for network idle waits in milliseconds" },
+          },
+          required: ["type"],
+        },
+        timeout: { type: "number", description: "Optional timeout in milliseconds for the wait condition" },
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
+      required: ["waitFor"],
     },
   },
   {
@@ -690,9 +768,11 @@ const toolToCommand: Record<string, string> = {
   browser_new_tab: "new_tab",
   browser_close_tab: "close_tab",
   browser_click: "click",
+  browser_click_and_wait: "click_and_wait",
   browser_right_click: "right_click",
   browser_double_click: "double_click",
   browser_type: "type",
+  browser_type_and_wait: "type_and_wait",
   browser_hover: "hover",
   browser_scroll: "scroll",
   browser_click_at: "click_at",
@@ -700,6 +780,7 @@ const toolToCommand: Record<string, string> = {
   browser_press_key: "press_key",
   browser_press_keys: "press_keys",
   browser_select: "select",
+  browser_submit_and_wait: "submit_and_wait",
   browser_wait_for_function: "wait_for_function",
   browser_list_targets: "list_targets",
   browser_wait_for_popup: "wait_for_popup",
