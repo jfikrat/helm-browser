@@ -1005,6 +1005,8 @@ export function validateSequenceStep(step, index) {
     case 'getElementText':
       if (!needsTarget(step)) return { valid: false, error: `Step ${index} getElementText requires selector or locator` };
       return { valid: true };
+    case 'query':
+      return { valid: true };
     default:
       return { valid: false, error: `Step ${index} has unsupported type: ${type}` };
   }
@@ -1068,6 +1070,20 @@ export async function runSequenceStep(tabId, sessionId, step, defaultTimeout = 1
         step.index ?? null,
         step.locator ?? null,
         step.visibleOnly
+      );
+    case 'query':
+      return await query(
+        step.selector ?? null,
+        step.locator ?? null,
+        step.scope ?? null,
+        step.match ?? 'best',
+        step.contains ?? null,
+        step.exact ?? null,
+        step.headingLevel ?? null,
+        step.includeHidden ?? false,
+        step.limit ?? 5,
+        tabId,
+        sessionId
       );
     default:
       return { success: false, error: `Unsupported step type: ${step.type}` };
@@ -1879,6 +1895,229 @@ export async function getElementText(selector, tabId, sessionId, index = null, l
 
   if (!ok) return { error, restricted };
   return result;
+}
+
+export async function query(
+  selector,
+  locator,
+  scope = null,
+  match = 'best',
+  contains = null,
+  exact = null,
+  headingLevel = null,
+  includeHidden = false,
+  limit = 5,
+  tabId,
+  sessionId
+) {
+  const tab = await getTargetTab(tabId, sessionId);
+
+  if (isRestrictedUrl(tab.url)) {
+    return { success: false, error: 'Cannot query elements on restricted page', restricted: true, url: tab.url };
+  }
+
+  if (!selector && locator) {
+    const resolved = await resolveLocator(tab.id, locator);
+    if (!resolved.ok) return { success: false, error: resolved.error, restricted: resolved.restricted, url: tab.url };
+    selector = resolved.selector;
+  }
+
+  const requestedMatch = ['first', 'best', 'all'].includes(String(match)) ? String(match) : 'best';
+  const clampedLimit = Math.min(Math.max(Number(limit) || 5, 1), 50);
+  const normalizedHeadingLevel = headingLevel === null || headingLevel === undefined
+    ? null
+    : Math.min(Math.max(Number(headingLevel) || 1, 1), 6);
+
+  const { ok, result, error, restricted } = await safeExecuteScript(
+    tab.id,
+    (options) => {
+      const getRefCounter = () => parseInt(document.body?.getAttribute('data-helm-ref-counter') || '0', 10);
+      const setRefCounter = (value) => {
+        if (document.body) document.body.setAttribute('data-helm-ref-counter', String(value));
+      };
+
+      const ensureRef = (element) => {
+        let ref = element.getAttribute('data-helm-ref');
+        if (ref) return ref;
+        let counter = getRefCounter();
+        ref = `e${++counter}`;
+        element.setAttribute('data-helm-ref', ref);
+        setRefCounter(counter);
+        return ref;
+      };
+
+      const buildSelector = (element) => {
+        if (!element) return null;
+        if (element.id) return `#${CSS.escape(element.id)}`;
+
+        const ref = element.getAttribute('data-helm-ref');
+        if (ref) return `[data-helm-ref="${CSS.escape(ref)}"]`;
+
+        const parts = [];
+        let current = element;
+        while (current && current !== document.body) {
+          let part = current.tagName.toLowerCase();
+          if (current.parentElement) {
+            const siblings = Array.from(current.parentElement.children).filter((child) => child.tagName === current.tagName);
+            if (siblings.length > 1) {
+              const index = siblings.indexOf(current) + 1;
+              part += `:nth-of-type(${index})`;
+            }
+          }
+          parts.unshift(part);
+          current = current.parentElement;
+        }
+        return `body > ${parts.join(' > ')}`;
+      };
+
+      const textOf = (element) => (
+        element.innerText ||
+        element.textContent ||
+        element.getAttribute('aria-label') ||
+        element.getAttribute('placeholder') ||
+        element.getAttribute('value') ||
+        ''
+      ).replace(/\s+/g, ' ').trim();
+
+      const isVisible = (element) => {
+        const style = window.getComputedStyle(element);
+        if (element.hidden === true) return false;
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        if (element.offsetWidth === 0 && element.offsetHeight === 0) return false;
+        return true;
+      };
+
+      const resolveScope = (scopeValue) => {
+        if (!scopeValue) return document;
+        const raw = String(scopeValue).trim();
+        if (!raw) return document;
+        const byRef = document.querySelector(`[data-helm-ref="${CSS.escape(raw)}"]`);
+        if (byRef) return byRef;
+        try {
+          return document.querySelector(raw);
+        } catch {
+          return null;
+        }
+      };
+
+      const scopeRoot = resolveScope(options.scope);
+      if (!scopeRoot) {
+        return { success: false, error: `Scope not found: ${options.scope}` };
+      }
+
+      let baseSelector = options.selector;
+      if (!baseSelector) {
+        if (options.headingLevel) {
+          baseSelector = `h${options.headingLevel}, [role="heading"][aria-level="${options.headingLevel}"]`;
+        } else {
+          baseSelector = 'h1, h2, h3, h4, h5, h6, [role="heading"], a, button, input, select, textarea, label, [role], [aria-label], [name]';
+        }
+      }
+
+      let candidates;
+      try {
+        candidates = Array.from(scopeRoot.querySelectorAll(baseSelector));
+      } catch (queryError) {
+        return { success: false, error: queryError?.message || `Invalid selector: ${baseSelector}` };
+      }
+
+      const normalizedContains = typeof options.contains === 'string' ? options.contains.trim().toLowerCase() : '';
+      const normalizedExact = typeof options.exact === 'string' ? options.exact.trim().toLowerCase() : '';
+
+      const scored = candidates
+        .map((element, index) => {
+          if (!options.includeHidden && !isVisible(element)) return null;
+
+          const text = textOf(element);
+          if (normalizedContains && !text.toLowerCase().includes(normalizedContains)) return null;
+          if (normalizedExact && text.toLowerCase() !== normalizedExact) return null;
+
+          const tag = element.tagName.toLowerCase();
+          const roleAttr = element.getAttribute('role');
+          const role = roleAttr || tag;
+          const isHeading = /^h[1-6]$/.test(tag) || roleAttr === 'heading';
+          const actualHeadingLevel = /^h[1-6]$/.test(tag)
+            ? Number(tag.slice(1))
+            : Number(element.getAttribute('aria-level') || 0) || null;
+
+          if (options.headingLevel && actualHeadingLevel !== options.headingLevel) return null;
+
+          const rect = element.getBoundingClientRect();
+          const inViewport = rect.top < window.innerHeight && rect.bottom > 0 && rect.left < window.innerWidth && rect.right > 0;
+          const meaningfulText = text.length > 0;
+          const hasAriaOrName = Boolean(element.getAttribute('aria-label') || element.getAttribute('name'));
+          const insideChrome = Boolean(element.closest('nav, header, footer'));
+          const fontSize = Number.parseFloat(window.getComputedStyle(element).fontSize || '12') || 12;
+
+          let score = 0;
+          if (inViewport) score += 10;
+          if (meaningfulText) score += 5;
+          if (isHeading) score += 3;
+          if (roleAttr) score += 2;
+          if (hasAriaOrName) score += 2;
+          if (!insideChrome) score += 3;
+          if (fontSize > 12) score += Math.floor((fontSize - 12) / 4);
+
+          const ref = ensureRef(element);
+          return {
+            text,
+            ref,
+            tag,
+            role,
+            selector: buildSelector(element),
+            score,
+            inViewport,
+            index,
+          };
+        })
+        .filter(Boolean);
+
+      const totalMatches = scored.length;
+      if (totalMatches === 0) {
+        return {
+          success: false,
+          match: options.match,
+          results: [],
+          totalMatches: 0,
+        };
+      }
+
+      const sorted = scored.slice().sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        if (a.index !== b.index) return a.index - b.index;
+        return 0;
+      });
+
+      let results;
+      if (options.match === 'first') {
+        results = [scored[0]];
+      } else if (options.match === 'all') {
+        results = sorted.slice(0, options.limit);
+      } else {
+        results = [sorted[0]];
+      }
+
+      return {
+        success: true,
+        match: options.match,
+        results,
+        totalMatches,
+      };
+    },
+    [{
+      selector,
+      scope,
+      match: requestedMatch,
+      contains,
+      exact,
+      headingLevel: normalizedHeadingLevel,
+      includeHidden: Boolean(includeHidden),
+      limit: clampedLimit,
+    }]
+  );
+
+  if (!ok) return { success: false, error, restricted, url: tab.url };
+  return { ...result, url: tab.url };
 }
 
 // Get current URL

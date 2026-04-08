@@ -29,6 +29,7 @@ import {
   getConsoleLogs,
   getNetworkRequests,
   getElementText,
+  query,
   getUrl,
   listTargets,
   click,
@@ -338,6 +339,20 @@ async function handleCommand(command, params) {
         params.index,
         params.locator,
         params.visibleOnly
+      );
+    case 'query':
+      return await query(
+        params.selector,
+        params.locator,
+        params.scope,
+        params.match,
+        params.contains,
+        params.exact,
+        params.headingLevel,
+        params.includeHidden,
+        params.limit,
+        params.tabId,
+        params.sessionId
       );
     case 'get_url':
       return await getUrl(params.tabId, params.sessionId);

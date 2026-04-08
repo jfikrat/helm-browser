@@ -124,6 +124,25 @@ export const tools: Tool[] = [
     },
   },
   {
+    name: "browser_query",
+    description: "Smart element read that ranks visible matches to find the most relevant content on noisy SPAs.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selector: { type: "string", description: "Optional CSS selector to query" },
+        locator: { type: "object", description: "Optional semantic locator (ref, role, name, text, label, placeholder, testId)" },
+        scope: { type: "string", description: "Optional scope selector or ref to search within" },
+        match: { type: "string", enum: ["first", "best", "all"], description: "How to return matching results (default best)" },
+        contains: { type: "string", description: "Optional text filter: result text must contain this string" },
+        exact: { type: "string", description: "Optional text filter: result text must equal this string" },
+        headingLevel: { type: "number", description: "Optional heading level filter (1-6)" },
+        includeHidden: { type: "boolean", description: "Include hidden elements in matching (default false)" },
+        limit: { type: "number", description: "Maximum results when match=all (default 5)" },
+        tabId: { type: "number", description: "Optional: specific tab" },
+      },
+    },
+  },
+  {
     name: "browser_get_content",
     description: "Get the current page title, URL, HTML, and visible text content. Heavy read because it includes full HTML; use lighter tools first when possible.",
     inputSchema: {
@@ -459,10 +478,17 @@ export const tools: Tool[] = [
             properties: {
               type: {
                 type: "string",
-                enum: ["click", "type", "submit", "pressKey", "select", "wait", "getUrl", "getElementText"],
+                enum: ["click", "type", "submit", "pressKey", "select", "wait", "getUrl", "getElementText", "query"],
               },
               selector: { type: "string", description: "Optional CSS selector for the step target" },
               locator: { type: "object", description: "Optional semantic locator for the step target" },
+              scope: { type: "string", description: "Optional scope selector or ref for query steps" },
+              match: { type: "string", enum: ["first", "best", "all"], description: "Query result mode for query steps" },
+              contains: { type: "string", description: "Optional text contains filter for query steps" },
+              exact: { type: "string", description: "Optional exact text filter for query steps" },
+              headingLevel: { type: "number", description: "Optional heading level filter for query steps" },
+              includeHidden: { type: "boolean", description: "Include hidden matches for query steps (default false)" },
+              limit: { type: "number", description: "Maximum query results for query steps when match=all" },
               text: { type: "string", description: "Text to type for type steps" },
               key: { type: "string", description: "Key name for pressKey steps" },
               value: { type: "string", description: "Option value or visible text for select steps" },
@@ -813,6 +839,7 @@ const toolToCommand: Record<string, string> = {
   browser_get_console_logs: "get_console_logs",
   browser_get_network_requests: "get_network_requests",
   browser_get_element_text: "get_element_text",
+  browser_query: "query",
   browser_get_url: "get_url",
   browser_get_tabs: "get_tabs",
   browser_switch_tab: "switch_tab",
