@@ -512,6 +512,8 @@ export const tools: Tool[] = [
     inputSchema: {
       type: "object",
       properties: {
+        incremental: { type: "boolean", description: "Return only changes since a prior snapshot version when possible" },
+        sinceVersion: { type: "number", description: "Previous snapshot version to diff against when incremental is true" },
         tabId: { type: "number", description: "Optional: specific tab" },
       },
     },

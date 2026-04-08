@@ -342,7 +342,12 @@ async function handleCommand(command, params) {
     case 'get_url':
       return await getUrl(params.tabId, params.sessionId);
     case 'get_snapshot':
-      return await getSnapshot(params.tabId, params.sessionId);
+      return await getSnapshot(
+        params.tabId,
+        params.sessionId,
+        params.incremental,
+        params.sinceVersion
+      );
     case 'list_targets':
       return await listTargets(params.sessionId);
 

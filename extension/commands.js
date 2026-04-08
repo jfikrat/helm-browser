@@ -24,6 +24,7 @@ const RESTRICTED_PATTERNS = [
 ];
 const ERROR_INDICATORS = ['ERR_', 'chrome-error://'];
 const DEBUGGER_GRACE_PERIOD_MS = 5000;
+const tabSnapshotCache = new Map();
 
 function isRestrictedUrl(url) {
   if (!url) return true;
@@ -1886,6 +1887,15 @@ export async function getUrl(tabId, sessionId) {
   return { url: tab.url, title: tab.title, tabId: tab.id };
 }
 
+function hashPageId(input) {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `p${(hash >>> 0).toString(36)}`;
+}
+
 export async function listTargets(sessionId) {
   const windowId = getWindowIdForSession(sessionId);
   const queryOpts = windowId ? { windowId } : {};
@@ -1924,7 +1934,7 @@ export async function listTargets(sessionId) {
   return { targets, count: targets.length };
 }
 
-export async function getSnapshot(tabId, sessionId) {
+export async function getSnapshot(tabId, sessionId, incremental = false, sinceVersion = null) {
   const tab = await getTargetTab(tabId, sessionId);
 
   if (isRestrictedUrl(tab.url)) {
@@ -1971,7 +1981,86 @@ export async function getSnapshot(tabId, sessionId) {
   );
 
   if (!ok) return { error };
-  return { elements: result, count: result.length, url: tab.url };
+
+  let pageId = null;
+  try {
+    const parsed = new URL(tab.url || '');
+    pageId = hashPageId(`${parsed.origin}${parsed.pathname}`);
+  } catch {
+    pageId = hashPageId(tab.url || 'about:blank');
+  }
+
+  const currentElements = Array.isArray(result) ? result : [];
+  const elementCount = currentElements.length;
+  const cached = tabSnapshotCache.get(tab.id);
+
+  if (
+    incremental === true &&
+    cached &&
+    cached.pageId === pageId &&
+    typeof sinceVersion === 'number' &&
+    sinceVersion === cached.version
+  ) {
+    const previousByRef = new Map(cached.elements.map((element) => [element.ref, element]));
+    const currentByRef = new Map(currentElements.map((element) => [element.ref, element]));
+
+    const added = [];
+    const removed = [];
+    const changed = [];
+
+    for (const [ref, element] of currentByRef.entries()) {
+      const previous = previousByRef.get(ref);
+      if (!previous) {
+        added.push(element);
+        continue;
+      }
+
+      const fields = ['tag', 'role', 'name', 'placeholder', 'type', 'href', 'x', 'y', 'width', 'height', 'inViewport'];
+      const hasChanged = fields.some((field) => previous[field] !== element[field]);
+      if (hasChanged) {
+        changed.push(element);
+      }
+    }
+
+    for (const ref of previousByRef.keys()) {
+      if (!currentByRef.has(ref)) {
+        removed.push(ref);
+      }
+    }
+
+    const nextVersion = cached.version + 1;
+    tabSnapshotCache.set(tab.id, {
+      pageId,
+      version: nextVersion,
+      elements: currentElements,
+    });
+
+    return {
+      pageId,
+      version: nextVersion,
+      mode: 'incremental',
+      added,
+      removed,
+      changed,
+      elementCount,
+      url: tab.url,
+    };
+  }
+
+  tabSnapshotCache.set(tab.id, {
+    pageId,
+    version: 1,
+    elements: currentElements,
+  });
+
+  return {
+    pageId,
+    version: 1,
+    mode: 'full',
+    elements: currentElements,
+    elementCount,
+    url: tab.url,
+  };
 }
 
 export async function waitForPopup(timeout = 10000, tabId, sessionId) {
