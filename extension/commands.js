@@ -2007,6 +2007,7 @@ export async function getSnapshot(tabId, sessionId, incremental = false, sinceVe
     const added = [];
     const removed = [];
     const changed = [];
+    const moved = [];
 
     for (const [ref, element] of currentByRef.entries()) {
       const previous = previousByRef.get(ref);
@@ -2015,10 +2016,15 @@ export async function getSnapshot(tabId, sessionId, incremental = false, sinceVe
         continue;
       }
 
-      const fields = ['tag', 'role', 'name', 'placeholder', 'type', 'href', 'x', 'y', 'width', 'height', 'inViewport'];
-      const hasChanged = fields.some((field) => previous[field] !== element[field]);
-      if (hasChanged) {
+      const semanticFields = ['tag', 'role', 'name', 'placeholder', 'type', 'href'];
+      const geometryFields = ['x', 'y', 'width', 'height', 'inViewport'];
+      const hasSemanticChange = semanticFields.some((field) => previous[field] !== element[field]);
+      const hasGeometryChange = geometryFields.some((field) => previous[field] !== element[field]);
+
+      if (hasSemanticChange) {
         changed.push(element);
+      } else if (hasGeometryChange) {
+        moved.push(element);
       }
     }
 
@@ -2042,6 +2048,7 @@ export async function getSnapshot(tabId, sessionId, incremental = false, sinceVe
       added,
       removed,
       changed,
+      moved,
       elementCount,
       url: tab.url,
     };
