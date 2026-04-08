@@ -3,6 +3,15 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OS="$(uname -s)"
+EXTENSION_DIR="$REPO_ROOT/extension"
+PACKED_DIR="$REPO_ROOT/packed"
+PACKED_CRX="$PACKED_DIR/extension.crx"
+PACKED_KEY="$PACKED_DIR/extension.pem"
+MANIFEST_PATH="$EXTENSION_DIR/manifest.json"
+
+EXTENSION_AUTO_INSTALL_STATUS="manual"
+EXTENSION_ID=""
+EXTENSION_VERSION=""
 
 log() {
   printf '[helm-install] %s\n' "$1"
@@ -32,6 +41,187 @@ ensure_bun() {
     printf '[helm-install] Add %s/bin to your PATH and re-run %s/install.sh\n' "${BUN_INSTALL:-$HOME/.bun}" "$REPO_ROOT" >&2
     exit 1
   fi
+}
+
+json_string() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+get_manifest_version() {
+  sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST_PATH" | head -n 1
+}
+
+find_chrome_packager() {
+  local candidates=(
+    "google-chrome-stable"
+    "google-chrome"
+    "chromium"
+    "chromium-browser"
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    "/Applications/Chromium.app/Contents/MacOS/Chromium"
+  )
+  local candidate
+
+  for candidate in "${candidates[@]}"; do
+    if [[ "$candidate" == /* ]]; then
+      if [[ -x "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    elif command -v "$candidate" >/dev/null 2>&1; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+compute_extension_id() {
+  local key_path="$1"
+
+  if [[ ! -f "$key_path" ]]; then
+    return 1
+  fi
+
+  openssl rsa -in "$key_path" -pubout -outform DER 2>/dev/null \
+    | openssl dgst -sha256 -binary \
+    | od -An -tx1 -v \
+    | tr -d ' \n' \
+    | cut -c1-32 \
+    | tr '0-9a-f' 'a-p'
+}
+
+pack_extension() {
+  local chrome_bin generated_crx generated_key
+  chrome_bin="$(find_chrome_packager || true)"
+
+  if [[ -z "$chrome_bin" ]]; then
+    log "Chrome/Chromium binary not found; skipping CRX packaging"
+    return 1
+  fi
+
+  mkdir -p "$PACKED_DIR"
+  generated_crx="$REPO_ROOT/extension.crx"
+  generated_key="$REPO_ROOT/extension.pem"
+
+  rm -f "$generated_crx"
+
+  if [[ -f "$PACKED_KEY" ]]; then
+    "$chrome_bin" --pack-extension="$EXTENSION_DIR" --pack-extension-key="$PACKED_KEY" >/dev/null 2>&1
+  else
+    "$chrome_bin" --pack-extension="$EXTENSION_DIR" >/dev/null 2>&1
+  fi
+
+  if [[ ! -f "$generated_crx" ]]; then
+    log "Chrome packaging did not produce $generated_crx"
+    return 1
+  fi
+
+  mv -f "$generated_crx" "$PACKED_CRX"
+  if [[ -f "$generated_key" ]]; then
+    mv -f "$generated_key" "$PACKED_KEY"
+  fi
+
+  EXTENSION_VERSION="$(get_manifest_version)"
+  EXTENSION_ID="$(compute_extension_id "$PACKED_KEY" || true)"
+
+  if [[ -z "$EXTENSION_ID" ]]; then
+    log "Failed to derive extension ID from $PACKED_KEY"
+    return 1
+  fi
+
+  log "Packed extension as $PACKED_CRX (id: $EXTENSION_ID)"
+  return 0
+}
+
+write_manifest_file() {
+  local target_path="$1"
+  local content="$2"
+  local target_dir
+  target_dir="$(dirname "$target_path")"
+
+  if [[ -w "$target_dir" ]] || { [[ -d "$target_dir" ]] && [[ -w "$target_path" ]]; }; then
+    mkdir -p "$target_dir"
+    printf '%s\n' "$content" >"$target_path"
+    return 0
+  fi
+
+  if ! command -v sudo >/dev/null 2>&1; then
+    log "Cannot write $target_path and sudo is not available"
+    return 1
+  fi
+
+  local tmpfile
+  tmpfile="$(mktemp)"
+  printf '%s\n' "$content" >"$tmpfile"
+  sudo mkdir -p "$target_dir"
+  sudo cp "$tmpfile" "$target_path"
+  sudo chmod 644 "$target_path"
+  rm -f "$tmpfile"
+}
+
+install_linux_external_extension() {
+  local manifest_dirs=()
+  local content installed_any=0 dir target
+
+  if command -v google-chrome-stable >/dev/null 2>&1 || command -v google-chrome >/dev/null 2>&1; then
+    manifest_dirs+=("/opt/google/chrome/extensions" "/usr/share/google-chrome/extensions")
+  fi
+
+  if command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1; then
+    manifest_dirs+=("/usr/share/chromium/extensions")
+  fi
+
+  if [[ "${#manifest_dirs[@]}" -eq 0 ]]; then
+    return 1
+  fi
+
+  content=$(cat <<EOF
+{
+  "external_crx": "$(json_string "$PACKED_CRX")",
+  "external_version": "$(json_string "$EXTENSION_VERSION")"
+}
+EOF
+)
+
+  for dir in "${manifest_dirs[@]}"; do
+    target="$dir/$EXTENSION_ID.json"
+    if write_manifest_file "$target" "$content"; then
+      log "Installed external extension manifest: $target"
+      installed_any=1
+    fi
+  done
+
+  if [[ "$installed_any" -eq 1 ]]; then
+    EXTENSION_AUTO_INSTALL_STATUS="linux-external-crx"
+    return 0
+  fi
+
+  return 1
+}
+
+setup_extension_install() {
+  if ! pack_extension; then
+    EXTENSION_AUTO_INSTALL_STATUS="manual"
+    return
+  fi
+
+  case "$OS" in
+    Linux)
+      if ! install_linux_external_extension; then
+        log "Failed to install Linux external extension manifests; leaving extension load as manual"
+        EXTENSION_AUTO_INSTALL_STATUS="manual"
+      fi
+      ;;
+    Darwin)
+      log "Packed Helm extension, but Chrome on macOS does not support local CRX auto-install. Manual Load unpacked is still required."
+      EXTENSION_AUTO_INSTALL_STATUS="manual-macos"
+      ;;
+    *)
+      EXTENSION_AUTO_INSTALL_STATUS="manual"
+      ;;
+  esac
 }
 
 install_dependencies() {
@@ -118,14 +308,36 @@ EOF
   log "Installed and started launchd agent: com.helm.browser.daemon"
 }
 
-print_manual_step() {
+print_post_install_steps() {
   printf '\n'
   printf 'Helm install complete.\n\n'
-  printf 'Manual step remaining:\n'
-  printf '1. Open chrome://extensions\n'
-  printf '2. Enable Developer mode\n'
-  printf '3. Click Load unpacked and choose:\n'
-  printf '   %s/extension\n\n' "$REPO_ROOT"
+
+  case "$EXTENSION_AUTO_INSTALL_STATUS" in
+    linux-external-crx)
+      printf 'Extension packaging complete.\n'
+      printf 'Chrome/Chromium will auto-install Helm from:\n'
+      printf '   %s\n\n' "$PACKED_CRX"
+      printf 'Next step:\n'
+      printf '1. Fully restart Chrome or Chromium\n'
+      printf '2. Confirm Helm appears in chrome://extensions\n\n'
+      ;;
+    manual-macos)
+      printf 'Chrome local CRX auto-install is not supported on macOS.\n'
+      printf 'Manual step remaining:\n'
+      printf '1. Open chrome://extensions\n'
+      printf '2. Enable Developer mode\n'
+      printf '3. Click Load unpacked and choose:\n'
+      printf '   %s/extension\n\n' "$REPO_ROOT"
+      ;;
+    *)
+      printf 'Manual step remaining:\n'
+      printf '1. Open chrome://extensions\n'
+      printf '2. Enable Developer mode\n'
+      printf '3. Click Load unpacked and choose:\n'
+      printf '   %s/extension\n\n' "$REPO_ROOT"
+      ;;
+  esac
+
   printf 'After that, point your MCP client at:\n'
   printf '   bun run %s/client/index.ts\n' "$REPO_ROOT"
 }
@@ -147,7 +359,8 @@ main() {
       ;;
   esac
 
-  print_manual_step
+  setup_extension_install
+  print_post_install_steps
 }
 
 main "$@"
