@@ -361,7 +361,10 @@ async function handleCommand(command, params) {
         params.tabId,
         params.sessionId,
         params.incremental,
-        params.sinceVersion
+        params.sinceVersion,
+        params.limit,
+        params.viewportOnly,
+        params.ranked
       );
     case 'list_targets':
       return await listTargets(params.sessionId);
@@ -484,7 +487,8 @@ async function handleCommand(command, params) {
         params.tabId,
         params.sessionId,
         params.stopOnError,
-        params.defaultTimeout
+        params.defaultTimeout,
+        params.captureSnapshot
       );
     case 'emulate_device':
       return await emulateDevice(params.device, params.tabId, params.sessionId);

@@ -959,6 +959,49 @@ function isSequenceStepSuccess(result) {
   return true;
 }
 
+function matchesUrlValue(url, expected, match = 'includes') {
+  const actual = String(url || '');
+  if (match === 'equals') return actual === expected;
+  if (match === 'startsWith') return actual.startsWith(expected);
+  return actual.includes(expected);
+}
+
+function assertionFailure(message, fallback, expected, actual) {
+  return {
+    success: false,
+    error: message || fallback,
+    expected,
+    actual,
+  };
+}
+
+function normalizeCaptureSnapshot(captureSnapshot, stepCount) {
+  if (captureSnapshot === true) {
+    return { indices: new Set([stepCount - 1]) };
+  }
+
+  if (captureSnapshot === false || captureSnapshot === null || captureSnapshot === undefined) {
+    return { indices: new Set() };
+  }
+
+  if (!Array.isArray(captureSnapshot)) {
+    return { error: 'captureSnapshot must be true or an array of step indices' };
+  }
+
+  const indices = new Set();
+  for (const rawIndex of captureSnapshot) {
+    if (!Number.isInteger(rawIndex)) {
+      return { error: 'captureSnapshot indices must be integers' };
+    }
+    if (rawIndex < 0 || rawIndex >= stepCount) {
+      return { error: `captureSnapshot index out of range: ${rawIndex}` };
+    }
+    indices.add(rawIndex);
+  }
+
+  return { indices };
+}
+
 export function validateSequenceStep(step, index) {
   if (!step || typeof step !== 'object' || Array.isArray(step)) {
     return { valid: false, error: `Step ${index} must be an object` };
@@ -1007,9 +1050,206 @@ export function validateSequenceStep(step, index) {
       return { valid: true };
     case 'query':
       return { valid: true };
+    case 'assertText':
+      if (!needsTarget(step)) return { valid: false, error: `Step ${index} assertText requires selector or locator` };
+      if (typeof step.contains !== 'string' && typeof step.exact !== 'string') {
+        return { valid: false, error: `Step ${index} assertText requires contains or exact` };
+      }
+      return { valid: true };
+    case 'assertUrl':
+      if (typeof step.value !== 'string' || !step.value.trim()) {
+        return { valid: false, error: `Step ${index} assertUrl requires value` };
+      }
+      return { valid: true };
+    case 'assertExists':
+      if (!needsTarget(step)) return { valid: false, error: `Step ${index} assertExists requires selector or locator` };
+      return { valid: true };
+    case 'assertCount':
+      if (typeof step.selector !== 'string' || !step.selector.trim()) {
+        return { valid: false, error: `Step ${index} assertCount requires selector` };
+      }
+      if (!Number.isFinite(step.min) && !Number.isFinite(step.max) && !Number.isFinite(step.exact)) {
+        return { valid: false, error: `Step ${index} assertCount requires min, max, or exact` };
+      }
+      return { valid: true };
     default:
       return { valid: false, error: `Step ${index} has unsupported type: ${type}` };
   }
+}
+
+async function assertTextStep(tabId, sessionId, step) {
+  const elementText = await getElementText(
+    step.selector ?? null,
+    tabId,
+    sessionId,
+    step.index ?? null,
+    step.locator ?? null,
+    step.visibleOnly ?? true
+  );
+
+  if (elementText?.error || elementText?.success === false) {
+    return assertionFailure(
+      step.message,
+      elementText?.error || 'Failed to read element text',
+      step.exact ?? step.contains ?? null,
+      null
+    );
+  }
+
+  const actual = String(elementText?.text || '');
+  if (typeof step.exact === 'string' && actual !== step.exact) {
+    return assertionFailure(
+      step.message,
+      `Expected text to equal "${step.exact}"`,
+      step.exact,
+      actual
+    );
+  }
+
+  if (typeof step.contains === 'string' && !actual.includes(step.contains)) {
+    return assertionFailure(
+      step.message,
+      `Expected text to contain "${step.contains}"`,
+      step.contains,
+      actual
+    );
+  }
+
+  return {
+    success: true,
+    expected: typeof step.exact === 'string' ? step.exact : step.contains,
+    actual,
+    text: actual,
+  };
+}
+
+async function assertUrlStep(tabId, sessionId, step) {
+  const current = await getUrl(tabId, sessionId);
+  const actual = String(current?.url || '');
+  const match = step.match || 'includes';
+
+  if (!matchesUrlValue(actual, step.value, match)) {
+    return assertionFailure(
+      step.message,
+      `Expected URL to ${match} "${step.value}"`,
+      { value: step.value, match },
+      actual
+    );
+  }
+
+  return {
+    success: true,
+    expected: { value: step.value, match },
+    actual,
+    url: actual,
+  };
+}
+
+async function assertExistsStep(tabId, sessionId, step) {
+  const found = await query(
+    step.selector ?? null,
+    step.locator ?? null,
+    step.scope ?? null,
+    'first',
+    null,
+    null,
+    null,
+    false,
+    1,
+    tabId,
+    sessionId
+  );
+
+  if (!found?.success || !Array.isArray(found?.results) || found.results.length === 0) {
+    return assertionFailure(
+      step.message,
+      found?.error || 'Expected element to exist and be visible',
+      true,
+      false
+    );
+  }
+
+  return {
+    success: true,
+    expected: true,
+    actual: true,
+    match: found.results[0],
+  };
+}
+
+async function assertCountStep(tabId, sessionId, step) {
+  const tab = await getTargetTab(tabId, sessionId);
+
+  if (isRestrictedUrl(tab.url)) {
+    return assertionFailure(step.message, 'Cannot count elements on restricted page', {
+      selector: step.selector,
+      min: step.min,
+      max: step.max,
+      exact: step.exact,
+    }, null);
+  }
+
+  const { ok, result, error, restricted } = await safeExecuteScript(
+    tab.id,
+    (selector) => {
+      try {
+        return { count: document.querySelectorAll(selector).length };
+      } catch (queryError) {
+        return { error: queryError?.message || `Invalid selector: ${selector}` };
+      }
+    },
+    [step.selector]
+  );
+
+  if (!ok) {
+    return assertionFailure(step.message, error || 'Failed to count elements', {
+      selector: step.selector,
+      min: step.min,
+      max: step.max,
+      exact: step.exact,
+    }, null);
+  }
+
+  if (result?.error) {
+    return { success: false, error: result.error, restricted };
+  }
+
+  const actual = Number(result?.count || 0);
+  if (Number.isFinite(step.exact) && actual !== step.exact) {
+    return assertionFailure(
+      step.message,
+      `Expected ${step.selector} count to equal ${step.exact}`,
+      { exact: step.exact },
+      actual
+    );
+  }
+  if (Number.isFinite(step.min) && actual < step.min) {
+    return assertionFailure(
+      step.message,
+      `Expected ${step.selector} count to be at least ${step.min}`,
+      { min: step.min },
+      actual
+    );
+  }
+  if (Number.isFinite(step.max) && actual > step.max) {
+    return assertionFailure(
+      step.message,
+      `Expected ${step.selector} count to be at most ${step.max}`,
+      { max: step.max },
+      actual
+    );
+  }
+
+  return {
+    success: true,
+    expected: {
+      ...(Number.isFinite(step.exact) ? { exact: step.exact } : {}),
+      ...(Number.isFinite(step.min) ? { min: step.min } : {}),
+      ...(Number.isFinite(step.max) ? { max: step.max } : {}),
+    },
+    actual,
+    count: actual,
+  };
 }
 
 export async function runSequenceStep(tabId, sessionId, step, defaultTimeout = 10000) {
@@ -1085,12 +1325,20 @@ export async function runSequenceStep(tabId, sessionId, step, defaultTimeout = 1
         tabId,
         sessionId
       );
+    case 'assertText':
+      return await assertTextStep(tabId, sessionId, step);
+    case 'assertUrl':
+      return await assertUrlStep(tabId, sessionId, step);
+    case 'assertExists':
+      return await assertExistsStep(tabId, sessionId, step);
+    case 'assertCount':
+      return await assertCountStep(tabId, sessionId, step);
     default:
       return { success: false, error: `Unsupported step type: ${step.type}` };
   }
 }
 
-export async function sequence(steps, tabId, sessionId, stopOnError = true, defaultTimeout = 10000) {
+export async function sequence(steps, tabId, sessionId, stopOnError = true, defaultTimeout = 10000, captureSnapshot = false) {
   const startedAt = Date.now();
   const targetTab = await getTargetTab(tabId, sessionId);
   const targetTabId = targetTab.id;
@@ -1152,6 +1400,26 @@ export async function sequence(steps, tabId, sessionId, stopOnError = true, defa
     };
   }
 
+  const captureConfig = normalizeCaptureSnapshot(captureSnapshot, steps.length);
+  if (captureConfig.error) {
+    const state = await getTabSummary(targetTabId);
+    return {
+      success: false,
+      results: [
+        {
+          index: 0,
+          type: 'validation',
+          success: false,
+          elapsedMs: 0,
+          result: { success: false, error: captureConfig.error },
+        },
+      ],
+      stoppedAt: 0,
+      ...state,
+      elapsedMs: Date.now() - startedAt,
+    };
+  }
+
   for (let i = 0; i < steps.length; i += 1) {
     const validation = validateSequenceStep(steps[i], i);
     if (!validation.valid) {
@@ -1177,6 +1445,11 @@ export async function sequence(steps, tabId, sessionId, stopOnError = true, defa
   return await withTabMutex(targetTabId, async () => {
     const results = [];
     let stoppedAt;
+    let baselineSnapshot = null;
+
+    if (captureConfig.indices.size > 0) {
+      baselineSnapshot = await getSnapshotStateForTab(targetTabId);
+    }
 
     for (let i = 0; i < steps.length; i += 1) {
       const step = steps[i];
@@ -1190,13 +1463,41 @@ export async function sequence(steps, tabId, sessionId, stopOnError = true, defa
       }
 
       const success = isSequenceStepSuccess(result);
-      results.push({
+      const entry = {
         index: i,
         type: step.type,
         success,
         elapsedMs: Date.now() - stepStartedAt,
         result,
-      });
+      };
+
+      if (captureConfig.indices.has(i)) {
+        const currentSnapshot = await getSnapshotStateForTab(targetTabId);
+        if (baselineSnapshot?.error || currentSnapshot?.error) {
+          entry.snapshotDelta = {
+            added: [],
+            removed: [],
+            changed: [],
+            moved: [],
+            error: baselineSnapshot?.error || currentSnapshot?.error || 'Failed to capture snapshot delta',
+          };
+        } else if (baselineSnapshot?.pageId !== currentSnapshot?.pageId) {
+          entry.snapshotDelta = {
+            added: currentSnapshot?.elements || [],
+            removed: (baselineSnapshot?.elements || []).map((element) => element.ref),
+            changed: [],
+            moved: [],
+          };
+        } else {
+          entry.snapshotDelta = diffSnapshotElements(
+            baselineSnapshot?.elements || [],
+            currentSnapshot?.elements || []
+          );
+        }
+        baselineSnapshot = currentSnapshot;
+      }
+
+      results.push(entry);
 
       if (!success && stopOnError !== false) {
         stoppedAt = i;
@@ -2135,53 +2436,111 @@ function hashPageId(input) {
   return `p${(hash >>> 0).toString(36)}`;
 }
 
-export async function listTargets(sessionId) {
-  const windowId = getWindowIdForSession(sessionId);
-  const queryOpts = windowId ? { windowId } : {};
-  const tabs = await chrome.tabs.query(queryOpts);
-
-  const targets = [];
-  for (const tab of tabs) {
-    const target = {
-      type: 'tab',
-      tabId: tab.id,
-      windowId: tab.windowId,
-      url: tab.url,
-      title: tab.title,
-      active: tab.active,
-      openerTabId: tab.openerTabId ?? null,
-      frames: [],
-    };
-
-    try {
-      const frames = await chrome.webNavigation.getAllFrames({ tabId: tab.id });
-      target.frames = (frames || [])
-        .map((frame) => ({
-          frameId: frame.frameId,
-          parentFrameId: frame.parentFrameId,
-          url: frame.url,
-          errorOccurred: frame.errorOccurred,
-        }))
-        .filter((frame) => frame.frameId !== 0);
-    } catch {
-      // Tab may not support frame listing
-    }
-
-    targets.push(target);
+function getPageIdForUrl(url) {
+  try {
+    const parsed = new URL(url || '');
+    return hashPageId(`${parsed.origin}${parsed.pathname}`);
+  } catch {
+    return hashPageId(url || 'about:blank');
   }
-
-  return { targets, count: targets.length };
 }
 
-export async function getSnapshot(tabId, sessionId, incremental = false, sinceVersion = null) {
-  const tab = await getTargetTab(tabId, sessionId);
+function diffSnapshotElements(previousElements, currentElements) {
+  const previousByRef = new Map(previousElements.map((element) => [element.ref, element]));
+  const currentByRef = new Map(currentElements.map((element) => [element.ref, element]));
 
-  if (isRestrictedUrl(tab.url)) {
-    return { error: 'Cannot get snapshot from restricted page', restricted: true };
+  const added = [];
+  const removed = [];
+  const changed = [];
+  const moved = [];
+  const semanticFields = ['tag', 'role', 'name', 'placeholder', 'type', 'href'];
+  const geometryFields = ['x', 'y', 'width', 'height', 'inViewport'];
+
+  for (const [ref, element] of currentByRef.entries()) {
+    const previous = previousByRef.get(ref);
+    if (!previous) {
+      added.push(element);
+      continue;
+    }
+
+    const hasSemanticChange = semanticFields.some((field) => previous[field] !== element[field]);
+    const hasGeometryChange = geometryFields.some((field) => previous[field] !== element[field]);
+
+    if (hasSemanticChange) {
+      changed.push(element);
+    } else if (hasGeometryChange) {
+      moved.push(element);
+    }
   }
 
+  for (const ref of previousByRef.keys()) {
+    if (!currentByRef.has(ref)) {
+      removed.push(ref);
+    }
+  }
+
+  return { added, removed, changed, moved };
+}
+
+function getSnapshotElementRank(element) {
+  const tag = String(element?.tag || '').toLowerCase();
+  const role = String(element?.role || '').toLowerCase();
+  const type = String(element?.type || '').toLowerCase();
+  const inViewportRank = element?.inViewport ? 1 : 0;
+
+  let categoryRank = 1;
+  if (
+    ['input', 'select', 'textarea'].includes(tag) ||
+    ['textbox', 'searchbox', 'combobox', 'listbox', 'checkbox', 'radio', 'switch', 'slider', 'spinbutton'].includes(role)
+  ) {
+    categoryRank = 4;
+  } else if (
+    tag === 'button' ||
+    ['button', 'tab', 'menuitem'].includes(role) ||
+    ['button', 'submit', 'reset'].includes(type)
+  ) {
+    categoryRank = 3;
+  } else if (tag === 'a' || role === 'link') {
+    categoryRank = 2;
+  }
+
+  return { inViewportRank, categoryRank };
+}
+
+function applySnapshotViewOptions(elements, {
+  limit = null,
+  viewportOnly = false,
+  ranked = false,
+} = {}) {
+  let output = Array.isArray(elements) ? elements.slice() : [];
+
+  if (viewportOnly) {
+    output = output.filter((element) => element?.inViewport);
+  }
+
+  if (ranked) {
+    output.sort((a, b) => {
+      const aRank = getSnapshotElementRank(a);
+      const bRank = getSnapshotElementRank(b);
+      if (bRank.inViewportRank !== aRank.inViewportRank) return bRank.inViewportRank - aRank.inViewportRank;
+      if (bRank.categoryRank !== aRank.categoryRank) return bRank.categoryRank - aRank.categoryRank;
+      if ((a.y ?? 0) !== (b.y ?? 0)) return (a.y ?? 0) - (b.y ?? 0);
+      if ((a.x ?? 0) !== (b.x ?? 0)) return (a.x ?? 0) - (b.x ?? 0);
+      return String(a.ref || '').localeCompare(String(b.ref || ''));
+    });
+  }
+
+  const normalizedLimit = Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : null;
+  if (normalizedLimit !== null) {
+    output = output.slice(0, normalizedLimit);
+  }
+
+  return output;
+}
+
+async function collectSnapshotElementsForTab(tabId) {
   const { ok, result, error } = await safeExecuteScript(
-    tab.id,
+    tabId,
     () => {
       let counter = parseInt(document.body?.getAttribute('data-helm-ref-counter') || '0', 10);
       const INTERACTIVE = 'a, button, input, select, textarea, [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="tab"], [role="menuitem"], [tabindex]';
@@ -2220,16 +2579,89 @@ export async function getSnapshot(tabId, sessionId, incremental = false, sinceVe
   );
 
   if (!ok) return { error };
+  return { elements: Array.isArray(result) ? result : [] };
+}
 
-  let pageId = null;
-  try {
-    const parsed = new URL(tab.url || '');
-    pageId = hashPageId(`${parsed.origin}${parsed.pathname}`);
-  } catch {
-    pageId = hashPageId(tab.url || 'about:blank');
+async function getSnapshotStateForTab(tabId) {
+  const tab = await chrome.tabs.get(tabId);
+
+  if (isRestrictedUrl(tab.url)) {
+    return {
+      error: 'Cannot get snapshot from restricted page',
+      restricted: true,
+      pageId: getPageIdForUrl(tab.url),
+      url: tab.url,
+      elements: [],
+    };
   }
 
-  const currentElements = Array.isArray(result) ? result : [];
+  const collected = await collectSnapshotElementsForTab(tab.id);
+  if (collected.error) {
+    return {
+      error: collected.error,
+      pageId: getPageIdForUrl(tab.url),
+      url: tab.url,
+      elements: [],
+    };
+  }
+
+  return {
+    pageId: getPageIdForUrl(tab.url),
+    url: tab.url,
+    elements: collected.elements,
+  };
+}
+
+export async function listTargets(sessionId) {
+  const windowId = getWindowIdForSession(sessionId);
+  const queryOpts = windowId ? { windowId } : {};
+  const tabs = await chrome.tabs.query(queryOpts);
+
+  const targets = [];
+  for (const tab of tabs) {
+    const target = {
+      type: 'tab',
+      tabId: tab.id,
+      windowId: tab.windowId,
+      url: tab.url,
+      title: tab.title,
+      active: tab.active,
+      openerTabId: tab.openerTabId ?? null,
+      frames: [],
+    };
+
+    try {
+      const frames = await chrome.webNavigation.getAllFrames({ tabId: tab.id });
+      target.frames = (frames || [])
+        .map((frame) => ({
+          frameId: frame.frameId,
+          parentFrameId: frame.parentFrameId,
+          url: frame.url,
+          errorOccurred: frame.errorOccurred,
+        }))
+        .filter((frame) => frame.frameId !== 0);
+    } catch {
+      // Tab may not support frame listing
+    }
+
+    targets.push(target);
+  }
+
+  return { targets, count: targets.length };
+}
+
+export async function getSnapshot(tabId, sessionId, incremental = false, sinceVersion = null, limit = null, viewportOnly = false, ranked = false) {
+  const tab = await getTargetTab(tabId, sessionId);
+
+  if (isRestrictedUrl(tab.url)) {
+    return { error: 'Cannot get snapshot from restricted page', restricted: true };
+  }
+
+  const snapshotState = await getSnapshotStateForTab(tab.id);
+  if (snapshotState.error) return { error: snapshotState.error, restricted: snapshotState.restricted };
+
+  const pageId = snapshotState.pageId;
+  const currentElements = snapshotState.elements;
   const elementCount = currentElements.length;
   const cached = tabSnapshotCache.get(tab.id);
 
@@ -2240,38 +2672,7 @@ export async function getSnapshot(tabId, sessionId, incremental = false, sinceVe
     typeof sinceVersion === 'number' &&
     sinceVersion === cached.version
   ) {
-    const previousByRef = new Map(cached.elements.map((element) => [element.ref, element]));
-    const currentByRef = new Map(currentElements.map((element) => [element.ref, element]));
-
-    const added = [];
-    const removed = [];
-    const changed = [];
-    const moved = [];
-
-    for (const [ref, element] of currentByRef.entries()) {
-      const previous = previousByRef.get(ref);
-      if (!previous) {
-        added.push(element);
-        continue;
-      }
-
-      const semanticFields = ['tag', 'role', 'name', 'placeholder', 'type', 'href'];
-      const geometryFields = ['x', 'y', 'width', 'height', 'inViewport'];
-      const hasSemanticChange = semanticFields.some((field) => previous[field] !== element[field]);
-      const hasGeometryChange = geometryFields.some((field) => previous[field] !== element[field]);
-
-      if (hasSemanticChange) {
-        changed.push(element);
-      } else if (hasGeometryChange) {
-        moved.push(element);
-      }
-    }
-
-    for (const ref of previousByRef.keys()) {
-      if (!currentByRef.has(ref)) {
-        removed.push(ref);
-      }
-    }
+    const diff = diffSnapshotElements(cached.elements, currentElements);
 
     const nextVersion = cached.version + 1;
     tabSnapshotCache.set(tab.id, {
@@ -2284,10 +2685,10 @@ export async function getSnapshot(tabId, sessionId, incremental = false, sinceVe
       pageId,
       version: nextVersion,
       mode: 'incremental',
-      added,
-      removed,
-      changed,
-      moved,
+      added: applySnapshotViewOptions(diff.added, { limit, viewportOnly, ranked }),
+      removed: diff.removed,
+      changed: applySnapshotViewOptions(diff.changed, { limit, viewportOnly, ranked }),
+      moved: applySnapshotViewOptions(diff.moved, { limit, viewportOnly, ranked }),
       elementCount,
       url: tab.url,
     };
@@ -2303,7 +2704,7 @@ export async function getSnapshot(tabId, sessionId, incremental = false, sinceVe
     pageId,
     version: 1,
     mode: 'full',
-    elements: currentElements,
+    elements: applySnapshotViewOptions(currentElements, { limit, viewportOnly, ranked }),
     elementCount,
     url: tab.url,
   };
