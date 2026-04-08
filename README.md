@@ -54,7 +54,6 @@ Most browser automation tools launch a separate headless Chromium. Helm takes a 
 ## Quick Start
 
 ### Prerequisites
-- [Bun](https://bun.sh) runtime
 - Chrome or Chromium
 
 ### 1. Install
@@ -62,10 +61,7 @@ Most browser automation tools launch a separate headless Chromium. Helm takes a 
 ```bash
 git clone https://github.com/jfikrat/helm-browser.git
 cd helm-browser
-
-cd daemon && bun install && cd ..
-cd server && bun install && cd ..
-cd client && bun install && cd ..
+./install.sh
 ```
 
 ### 2. Load Chrome Extension
@@ -74,33 +70,15 @@ cd client && bun install && cd ..
 2. Enable **Developer mode**
 3. Click **Load unpacked** → select `extension/` folder
 
-### 3. Start Daemon
+`install.sh` installs Bun if needed, runs `bun install` in `daemon/`, `server/`, and `client/`, and registers the daemon as a user service (`systemd` on Linux, `launchd` on macOS). It is safe to re-run.
+
+To remove the service and installed dependencies later:
 
 ```bash
-cd daemon && bun run start
+./uninstall.sh
 ```
 
-<details>
-<summary>Optional: systemd service (Linux)</summary>
-
-```bash
-cat > ~/.config/systemd/user/helm-daemon.service << EOF
-[Unit]
-Description=Helm Browser Daemon
-
-[Service]
-ExecStart=$(which bun) run $(pwd)/daemon/index.ts
-Restart=always
-
-[Install]
-WantedBy=default.target
-EOF
-
-systemctl --user enable --now helm-daemon
-```
-</details>
-
-### 4. Configure MCP
+### 3. Configure MCP
 
 Add to your MCP config (e.g., `~/.claude/claude.json`):
 
