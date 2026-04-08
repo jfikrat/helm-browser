@@ -66,6 +66,7 @@ import {
   clickAndWait,
   typeAndWait,
   submitAndWait,
+  sequence,
 } from './commands.js';
 
 // Set up debugger event listener for screencast frames
@@ -449,6 +450,14 @@ async function handleCommand(command, params) {
         params.tabId,
         params.sessionId,
         params.locator
+      );
+    case 'sequence':
+      return await sequence(
+        params.steps,
+        params.tabId,
+        params.sessionId,
+        params.stopOnError,
+        params.defaultTimeout
       );
     case 'emulate_device':
       return await emulateDevice(params.device, params.tabId, params.sessionId);

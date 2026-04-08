@@ -948,6 +948,238 @@ async function runCompositeAction(tabId, action, waitFor, timeout, sessionId) {
   });
 }
 
+function isSequenceStepSuccess(result) {
+  if (result && typeof result === 'object' && 'success' in result) {
+    return result.success !== false;
+  }
+  if (result && typeof result === 'object' && 'error' in result) {
+    return !result.error;
+  }
+  return true;
+}
+
+export function validateSequenceStep(step, index) {
+  if (!step || typeof step !== 'object' || Array.isArray(step)) {
+    return { valid: false, error: `Step ${index} must be an object` };
+  }
+
+  const type = String(step.type || '').trim();
+  if (!type) {
+    return { valid: false, error: `Step ${index} is missing type` };
+  }
+
+  const needsTarget = (value) => Boolean(value.selector || value.locator);
+
+  switch (type) {
+    case 'click':
+      if (!needsTarget(step)) return { valid: false, error: `Step ${index} click requires selector or locator` };
+      return { valid: true };
+    case 'type':
+      if (!needsTarget(step)) return { valid: false, error: `Step ${index} type requires selector or locator` };
+      if (typeof step.text !== 'string') return { valid: false, error: `Step ${index} type requires text` };
+      return { valid: true };
+    case 'submit':
+      return { valid: true };
+    case 'pressKey':
+      if (typeof step.key !== 'string' || !step.key.trim()) return { valid: false, error: `Step ${index} pressKey requires key` };
+      return { valid: true };
+    case 'select':
+      if (!needsTarget(step)) return { valid: false, error: `Step ${index} select requires selector or locator` };
+      if (typeof step.value !== 'string') return { valid: false, error: `Step ${index} select requires value` };
+      return { valid: true };
+    case 'wait': {
+      const waitFor = step.waitFor;
+      if (!waitFor || typeof waitFor !== 'object' || Array.isArray(waitFor)) {
+        return { valid: false, error: `Step ${index} wait requires waitFor` };
+      }
+      const waitType = String(waitFor.type || '').trim();
+      if (!waitType) return { valid: false, error: `Step ${index} waitFor requires type` };
+      if ((waitType === 'url' || waitType === 'selector' || waitType === 'function') && typeof waitFor.value !== 'string') {
+        return { valid: false, error: `Step ${index} waitFor.${waitType} requires value` };
+      }
+      return { valid: true };
+    }
+    case 'getUrl':
+      return { valid: true };
+    case 'getElementText':
+      if (!needsTarget(step)) return { valid: false, error: `Step ${index} getElementText requires selector or locator` };
+      return { valid: true };
+    default:
+      return { valid: false, error: `Step ${index} has unsupported type: ${type}` };
+  }
+}
+
+export async function runSequenceStep(tabId, sessionId, step, defaultTimeout = 10000) {
+  switch (step.type) {
+    case 'click':
+      return await click(
+        step.selector ?? null,
+        tabId,
+        sessionId,
+        step.verify ?? false,
+        step.verifyTimeout ?? 150,
+        step.locator ?? null
+      );
+    case 'type':
+      return await type(
+        step.selector ?? null,
+        step.text,
+        tabId,
+        sessionId,
+        step.verify ?? false,
+        step.verifyTimeout ?? 1000,
+        step.locator ?? null
+      );
+    case 'submit':
+      return await submit(step.selector ?? null, tabId, sessionId, step.locator ?? null);
+    case 'pressKey':
+      return await pressKey(
+        step.key,
+        step.selector ?? null,
+        tabId,
+        sessionId,
+        step.verify ?? false,
+        step.verifyTimeout ?? 300,
+        step.locator ?? null
+      );
+    case 'select':
+      return await selectOption(
+        step.selector ?? null,
+        step.value,
+        tabId,
+        sessionId,
+        step.locator ?? null
+      );
+    case 'wait':
+      return await waitForCompositeCondition(
+        step.waitFor,
+        step.timeout ?? defaultTimeout,
+        tabId,
+        sessionId
+      );
+    case 'getUrl':
+      return await getUrl(tabId, sessionId);
+    case 'getElementText':
+      return await getElementText(
+        step.selector ?? null,
+        tabId,
+        sessionId,
+        step.index ?? null,
+        step.locator ?? null
+      );
+    default:
+      return { success: false, error: `Unsupported step type: ${step.type}` };
+  }
+}
+
+export async function sequence(steps, tabId, sessionId, stopOnError = true, defaultTimeout = 10000) {
+  const startedAt = Date.now();
+  const targetTab = await getTargetTab(tabId, sessionId);
+  const targetTabId = targetTab.id;
+
+  if (!Array.isArray(steps)) {
+    const state = await getTabSummary(targetTabId);
+    return {
+      success: false,
+      results: [
+        {
+          index: 0,
+          type: 'validation',
+          success: false,
+          elapsedMs: 0,
+          result: { success: false, error: 'steps must be an array' },
+        },
+      ],
+      stoppedAt: 0,
+      ...state,
+      elapsedMs: Date.now() - startedAt,
+    };
+  }
+
+  if (steps.length > 25) {
+    const state = await getTabSummary(targetTabId);
+    return {
+      success: false,
+      results: [
+        {
+          index: 25,
+          type: 'validation',
+          success: false,
+          elapsedMs: 0,
+          result: { success: false, error: 'Maximum 25 steps allowed' },
+        },
+      ],
+      stoppedAt: 25,
+      ...state,
+      elapsedMs: Date.now() - startedAt,
+    };
+  }
+
+  for (let i = 0; i < steps.length; i += 1) {
+    const validation = validateSequenceStep(steps[i], i);
+    if (!validation.valid) {
+      const state = await getTabSummary(targetTabId);
+      return {
+        success: false,
+        results: [
+          {
+            index: i,
+            type: steps[i]?.type || 'validation',
+            success: false,
+            elapsedMs: 0,
+            result: { success: false, error: validation.error },
+          },
+        ],
+        stoppedAt: i,
+        ...state,
+        elapsedMs: Date.now() - startedAt,
+      };
+    }
+  }
+
+  return await withTabMutex(targetTabId, async () => {
+    const results = [];
+    let stoppedAt;
+
+    for (let i = 0; i < steps.length; i += 1) {
+      const step = steps[i];
+      const stepStartedAt = Date.now();
+      let result;
+
+      try {
+        result = await runSequenceStep(targetTabId, sessionId, step, defaultTimeout);
+      } catch (error) {
+        result = { success: false, error: error?.message || String(error) };
+      }
+
+      const success = isSequenceStepSuccess(result);
+      results.push({
+        index: i,
+        type: step.type,
+        success,
+        elapsedMs: Date.now() - stepStartedAt,
+        result,
+      });
+
+      if (!success && stopOnError !== false) {
+        stoppedAt = i;
+        break;
+      }
+    }
+
+    const state = await getTabSummary(targetTabId);
+    const overallSuccess = results.length === steps.length && results.every((entry) => entry.success);
+
+    return {
+      success: overallSuccess,
+      results,
+      ...(stoppedAt !== undefined ? { stoppedAt } : {}),
+      ...state,
+      elapsedMs: Date.now() - startedAt,
+    };
+  });
+}
+
 function serializeRemoteObject(arg) {
   if (arg?.value !== undefined) return arg.value;
   if (arg?.unserializableValue !== undefined) return arg.unserializableValue;

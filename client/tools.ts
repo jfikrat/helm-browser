@@ -444,6 +444,54 @@ export const tools: Tool[] = [
     },
   },
   {
+    name: "browser_sequence",
+    description: "Run up to 25 browser steps inside one extension-native sequence to reduce round-trips",
+    inputSchema: {
+      type: "object",
+      properties: {
+        steps: {
+          type: "array",
+          description: "Ordered browser steps to run. Maximum 25 steps.",
+          maxItems: 25,
+          items: {
+            type: "object",
+            properties: {
+              type: {
+                type: "string",
+                enum: ["click", "type", "submit", "pressKey", "select", "wait", "getUrl", "getElementText"],
+              },
+              selector: { type: "string", description: "Optional CSS selector for the step target" },
+              locator: { type: "object", description: "Optional semantic locator for the step target" },
+              text: { type: "string", description: "Text to type for type steps" },
+              key: { type: "string", description: "Key name for pressKey steps" },
+              value: { type: "string", description: "Option value or visible text for select steps" },
+              index: { type: "number", description: "Optional element index for getElementText steps" },
+              verify: { type: "boolean", description: "Optional verification flag for click/type/pressKey steps" },
+              verifyTimeout: { type: "number", description: "Optional verification timeout for click/type/pressKey steps" },
+              timeout: { type: "number", description: "Optional timeout override for wait steps" },
+              waitFor: {
+                type: "object",
+                description: "Wait condition for wait steps",
+                properties: {
+                  type: { type: "string", enum: ["url", "selector", "networkIdle", "function"] },
+                  value: { type: "string", description: "URL fragment, selector, or JavaScript expression depending on wait type" },
+                  match: { type: "string", enum: ["includes", "equals", "startsWith"], description: "URL match mode when waitFor.type is url" },
+                  timeout: { type: "number", description: "Idle timeout for networkIdle waits in milliseconds" },
+                },
+                required: ["type"],
+              },
+            },
+            required: ["type"],
+          },
+        },
+        tabId: { type: "number", description: "Optional: specific tab" },
+        stopOnError: { type: "boolean", description: "Stop on first failed step (default true)" },
+        defaultTimeout: { type: "number", description: "Default timeout in milliseconds for wait steps (default 10000)" },
+      },
+      required: ["steps"],
+    },
+  },
+  {
     name: "browser_select",
     description: "Select an option in a dropdown by value or visible text",
     inputSchema: {
@@ -780,6 +828,7 @@ const toolToCommand: Record<string, string> = {
   browser_press_key: "press_key",
   browser_press_keys: "press_keys",
   browser_select: "select",
+  browser_sequence: "sequence",
   browser_submit_and_wait: "submit_and_wait",
   browser_wait_for_function: "wait_for_function",
   browser_list_targets: "list_targets",
